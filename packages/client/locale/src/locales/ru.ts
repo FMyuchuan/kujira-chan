@@ -34,7 +34,7 @@ export const ru = {
   'collapse': 'Свернуть',
   'expand': 'Развернуть',
   'back': 'Назад',
-  'brand.localBuild': 'Локальная сборка DSH',
+  'brand.localBuild': 'Kujira Chan',
   'workspace.defaultName': 'Рабочая область по умолчанию',
   'unknown': 'Неизвестно',
   'none': 'Нет',
