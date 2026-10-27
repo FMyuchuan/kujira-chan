@@ -15,6 +15,9 @@ const AUTH_RECORD_KEY = credentialKey('client-connection', 'browser-session')
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1000
 const SECRET_BYTES = 32
 const TOKEN_QUERY = 'token'
+const BASIC_PREFIX = 'Basic '
+const BASIC_REALM = 'DeepSeek Harness'
+const PASSWORD_VARIABLE = 'DSH_WEB_PASSWORD'
 const COOKIE_PREFIX = 'dsh-auth-'
 const COOKIE_PAYLOAD_VERSION = 1
 const STORED_SECRET_VERSION = 1
@@ -111,6 +114,48 @@ function tokenMatches(actual: string, expected: string): boolean {
   const actualBytes = Buffer.from(actual, 'utf8')
   const expectedBytes = Buffer.from(expected, 'utf8')
   return actualBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(actualBytes, expectedBytes)
+}
+
+/** Compare two secrets without leaking length or prefix through comparison timing. */
+function secretMatches(actual: string, expected: string): boolean {
+  const actualDigest = createHash('sha256').update(actual, 'utf8').digest()
+  const expectedDigest = createHash('sha256').update(expected, 'utf8').digest()
+  return timingSafeEqual(actualDigest, expectedDigest)
+}
+
+/**
+ * Realm password configured through the environment. Absent or empty keeps
+ * Basic authentication disabled, so a checkout without the variable behaves
+ * exactly like upstream.
+ */
+function configuredPassword(): string | undefined {
+  const value = process.env[PASSWORD_VARIABLE]
+  return value === undefined || value.length === 0 ? undefined : value
+}
+
+/** Whether the bounded Basic realm is active for this process. */
+function basicAuthenticationEnabled(): boolean {
+  return configuredPassword() !== undefined
+}
+
+/**
+ * Decode one `Authorization: Basic` header and compare its password field.
+ * The user name is informational: the realm protects a single server identity.
+ */
+function basicAuthorizationAccepted(headers: ConnectionTrustRequest['headers']): boolean {
+  const expected = configuredPassword()
+  if (expected === undefined) return false
+  const raw = header(headers, 'authorization')
+  if (raw === undefined || !raw.startsWith(BASIC_PREFIX)) return false
+  let decoded: string
+  try {
+    decoded = Buffer.from(raw.slice(BASIC_PREFIX.length).trim(), 'base64').toString('utf8')
+  } catch {
+    return false
+  }
+  const separator = decoded.indexOf(':')
+  if (separator === -1) return false
+  return secretMatches(decoded.slice(separator + 1), expected)
 }
 
 function cookieName(authority: string): string {
@@ -263,6 +308,30 @@ export class BrowserAuth {
   authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse, secure = false): boolean {
     /* v8 ignore next -- node:http always supplies url on server requests. */
     const url = new URL(req.url ?? '/', 'http://dsh.invalid')
+    if (req.method === 'GET' && url.pathname === '/' && basicAuthorizationAccepted(req.headers)) {
+      const authority = requestAudience(req.headers, secure)
+      if (authority !== undefined) {
+        if (this.isAuthenticated(req, secure)) return true
+        const issuedAt = Date.now()
+        const expiresAt = issuedAt + this.maxAgeMilliseconds
+        const value = encodeCookie({
+          version: COOKIE_PAYLOAD_VERSION,
+          authority,
+          issuedAt,
+          expiresAt,
+        }, this.secret)
+        res.writeHead(303, {
+          'cache-control': 'no-store',
+          'location': './',
+          'referrer-policy': 'no-referrer',
+          'set-cookie': sessionCookie(
+            cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), secure,
+          ),
+        })
+        res.end()
+        return false
+      }
+    }
     const tokens = url.searchParams.getAll(TOKEN_QUERY)
     if (tokens.length > 0) {
       const authority = requestAudience(req.headers, secure)
@@ -383,12 +452,18 @@ export class BrowserAuth {
   }
 
   private writeUnauthorized(req: ConnectionIndexRequest, res: ConnectionIndexResponse): void {
-    res.writeHead(401, {
+    const headers: Record<string, string> = {
       'cache-control': 'no-store',
       'content-type': 'text/plain; charset=utf-8',
-    })
+    }
+    if (basicAuthenticationEnabled()) {
+      headers['www-authenticate'] = `${BASIC_PREFIX}realm="${BASIC_REALM}"`
+    }
+    res.writeHead(401, headers)
     res.end(req.method === 'HEAD'
       ? undefined
-      : 'dsh web authentication required; reopen the URL printed by dsh web.\n')
+      : basicAuthenticationEnabled()
+        ? 'dsh web authentication required; enter the configured password.\n'
+        : 'dsh web authentication required; reopen the URL printed by dsh web.\n')
   }
 }
