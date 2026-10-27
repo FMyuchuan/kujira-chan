@@ -2,6 +2,12 @@
 
 [English](README.md) | 中文
 
+> **Kujira Chan 构建版** —— 本分支是 DeepSeek Harness 的个人 fork。
+> 它通过 `DSH_WEB_PASSWORD` 增加了可选的 HTTP Basic 认证，把本地构建重命名为
+> **Kujira Chan**，并记录了一条适用于内存受限主机的编译路径（此类主机无法完成
+> 聚合式 TypeScript 构建）。部署说明见 [KUJIRA.md](KUJIRA.md)。
+
+
 DeepSeek Harness（`dsh`）是由 [DeepSeek AI](https://deepseek.com) 开发的开源 agent harness（智能体框架）。
 
 它构建于**一切皆插件**的架构之上，由 [Cordis](https://github.com/cordiverse/cordis) 驱动，其设计参见论文 [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512)。

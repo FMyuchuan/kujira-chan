@@ -2,6 +2,13 @@
 
 English | [中文](README.zh.md)
 
+> **Kujira Chan build** — this branch is a personal fork of DeepSeek Harness.
+> It adds optional HTTP Basic authentication through `DSH_WEB_PASSWORD`, rebrands
+> the local build as **Kujira Chan**, and records a memory-constrained build path
+> for hosts where the aggregate TypeScript build does not fit. Deployment notes
+> live in [KUJIRA.md](KUJIRA.md).
+
+
 DeepSeek Harness (`dsh`) is an open-source agent harness developed by [DeepSeek AI](https://deepseek.com).
 
 It is built on an **everything-is-a-plugin** architecture and powered by [Cordis](https://github.com/cordiverse/cordis), whose design is described in [_A Programming Paradigm for Spatiotemporal Composability_](https://arxiv.org/abs/2608.25512).
