@@ -453,6 +453,10 @@
     - id: ui-settings-web-search
       name: '@deepseek-ai/dsh-client-ui-settings-web-search'
 
+    # Kujira Chan: the branch's own built-in plugin surface.
+    - id: ui-settings-kujira-chan
+      name: '@deepseek-ai/dsh-client-ui-settings-kujira-chan'
+
     # Plan control: the composer plan seat over the plan projection + /plan channel.
     - id: ui-plan
       name: '@deepseek-ai/dsh-client-ui-plan'

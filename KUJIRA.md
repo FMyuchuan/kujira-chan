@@ -161,3 +161,39 @@ journalctl -u dsh-web -f
 3. `DSH_WEB_PASSWORD` 以环境变量形式存在于 systemd unit 中（unit 权限 `600`），
    不是独立的凭据存储
 4. 上游若改动 `browser-auth.ts` 或 locale / vite 默认值，`git pull` 时可能产生冲突
+
+## Kujira Chan 内置插件
+
+`packages/client/ui-settings-kujira-chan` 是本分支自带的插件，注册在 Web 客户端
+Plugins 页面的 `plugins.item` 槽位（内置插件 / Official 分组）。
+
+| 文件 | 作用 |
+|---|---|
+| `src/index.ts` | Host 半：空 `apply()`，让插件出现在 Loader 与内置插件清单里 |
+| `src/client/index.ts` | 注册 `plugins.item`，id `kujira-chan`，order 100 |
+| `src/client/KujiraChanPage.tsx` | `summary` 视图返回卡片一行描述，`page` 视图是当前的空配置页 |
+| `src/client/locales.ts` | 中英文案 |
+
+注册点共三处：
+
+```
+tsconfig.client.json                                client aggregate reference
+packages/bundle/web-app/package.json                workspace dependency
+packages/bundle/web-app/cordis.patch.yml            loader entry ui-settings-kujira-chan
+```
+
+### 构建注意
+
+在线 `pnpm install` 在无法访问 `cdn.sheetjs.com`（`xlsx` 的 tarball）时会失败。
+本包没有新增外部依赖，因此可以只补 workspace 符号链接：
+
+```bash
+ln -sfn ../../../../client/ui-settings-kujira-chan \
+  packages/bundle/web-app/node_modules/@deepseek-ai/dsh-client-ui-settings-kujira-chan
+```
+
+`pnpm-lock.yaml` 此时不含该包记录；网络恢复后需要补跑一次 `pnpm install`，
+否则 `--frozen-lockfile` 安装会失败。
+
+构建步骤与主流程一致：`tsc -b` 该包 → `tsdown --env.DSH_BUILD_FACE client`
+→ `pnpm run build:web` → 重启服务。
