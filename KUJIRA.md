@@ -197,3 +197,100 @@ ln -sfn ../../../../client/ui-settings-kujira-chan \
 
 构建步骤与主流程一致：`tsc -b` 该包 → `tsdown --env.DSH_BUILD_FACE client`
 → `pnpm run build:web` → 重启服务。
+
+## Kujira Chan 人格功能
+
+`packages/host/kujira-chan`（`@deepseek-ai/dsh-host-kujira-chan`）维护一份人格列表；
+每个人格对应一个工作区，并在该工作区里自动创建一个主会话。
+
+### 数据与位置
+
+| 项 | 位置 |
+|---|---|
+| 人格列表 | `~/.dsh/kujira-personas.json` |
+| 人格工作区 | `~/Documents/deepseek-harness/personas/<slug>-<8位随机>` |
+| 主会话标题 | `<人格名> · 主会话` |
+
+`create` 依次执行：`mkdir` → `workspaceRegistry.create(path, name)` →
+`sessionController.create({ workspaceId })` → `sessionController.rename(...)`。
+`drop` 依据调用方选项决定是否 `workspaceRegistry.delete` + `rm -rf` 目录，
+以及是否 `workspaceController.archiveSession`。
+
+### Remote 方法
+
+| 方法 | 说明 |
+|---|---|
+| `kujiraPersona/list` | 读取人格列表 |
+| `kujiraPersona/create` | 创建人格 + 工作区 + 主会话 |
+| `kujiraPersona/drop` | 移除人格，可带 `deleteWorkspace` / `archiveSession` |
+
+> `drop` 不能命名为 `remove`：`RemoteNamespaceService` 自身拥有 `remove()` 原型方法，
+> `assertMethodAvailable` 会拒绝同名 Remote 方法，整个 Client 装配会挂载失败。
+
+### 使功能生效需要的服务器侧配置
+
+这些在仓库之外，重建环境时必须手工补上。
+
+**1. profile 层（`~/.dsh/profiles/web/cordis.patch.yml`）**
+
+```yaml
+- id: workspace-controller
+  name: "@deepseek-ai/dsh-api-workspace-controller"
+  config:
+    documentsDirectory: /root/Documents
+
+- id: typert-loader
+  name: "@deepseek-ai/dsh-typert-loader"
+  config:
+    packages:
+      - "@deepseek-ai/dsh-host-kujira-chan"
+```
+
+前者避开无头主机缺失的 `xdg-user-dir`；后者让 `typert-loader` 加载本包的
+`./typert` 清单，否则它会静默跳过，Client 的 `$mount` 随之失败并连带 62 个插件 pending。
+
+**2. Client 装配登记（`packages/api/remotes/src/client/index.ts`）**
+
+Remote namespace 必须显式加入挂载数组，否则 `ctx.remote.kujiraPersona` 不存在：
+
+```ts
+import kujiraPersonaRemote from '@deepseek-ai/dsh-host-kujira-chan/remote'
+...
+kujiraPersonaRemote,
+```
+
+同时 Client 插件的 `inject` 必须逐项列出 namespace：
+
+```ts
+export const inject = ['slots', 'locale', 'remote', 'remote.kujiraPersona', 'uiWorkspace']
+```
+
+只写 `remote` 会得到 `cannot get property "remote.kujiraPersona" without inject`。
+
+**3. 手工 node_modules 链接**
+
+`pnpm install` 在当前网络环境会卡在 `cdn.sheetjs.com`（`xlsx` 的 tarball）超时，
+新包因此没有依赖链接，需要手工补：
+
+```bash
+H=packages/host/kujira-chan/node_modules/@deepseek-ai
+mkdir -p "$H"
+ln -sfn ../../../../typert/protocol          "$H/dsh-typert-protocol"
+ln -sfn ../../../../api/session-controller    "$H/dsh-api-session-controller"
+ln -sfn ../../../../workspace/workspace       "$H/dsh-workspace"
+ln -sfn ../../../../api/remote-access         "$H/dsh-api-remote-access"
+ln -sfn ../../../../api/workspace-controller  "$H/dsh-api-workspace-controller"
+ln -sfn ../../../../../vendor/cordis          "$H/cordis"
+
+ln -sfn ../../packages/host/kujira-chan node_modules/@deepseek-ai/dsh-host-kujira-chan
+ln -sfn ../../../../host/kujira-chan packages/bundle/web-app/node_modules/@deepseek-ai/dsh-host-kujira-chan
+```
+
+网络恢复后跑一次 `pnpm install` 即可把 `pnpm-lock.yaml` 补全并替代这些链接。
+
+### 已知限制
+
+主会话不出现在侧栏的会话列表里。`ApiSessionList.list` 只遍历
+`sessionQuery.listSessions()`（磁盘记录），而尚未产生任何事件的空会话不落盘。
+dsh 自身的「新会话」走客户端草稿态，发第一条消息后才写入，所以没有可复用的空白行。
+人格卡片上提供了「打开主会话」入口作为替代路径。

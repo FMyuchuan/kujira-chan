@@ -2,7 +2,9 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import productAnalyticsRemote from '@deepseek-ai/dsh-client-product-analytics/remote'
+import kujiraPersonaRemote from '@deepseek-ai/dsh-host-kujira-chan/remote'
 export type {} from '@deepseek-ai/dsh-client-product-analytics/remote'
+export type {} from '@deepseek-ai/dsh-host-kujira-chan/remote'
 import agentPresetsRemote from '@deepseek-ai/dsh-agent-preset-registry/remote'
 import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import commandsRemote from '@deepseek-ai/dsh-commands/remote'
@@ -185,9 +187,10 @@ export const inject = ['remote']
  */
 export async function apply(ctx: Context): Promise<() => Promise<void>> {
   const disposers: Array<() => Promise<void>> = []
+  let active
   try {
     for (const contribution of [
-      productAnalyticsRemote, agentPresetsRemote, commandsRemote, settingsControllerRemote, accountRemote,
+      kujiraPersonaRemote, productAnalyticsRemote, agentPresetsRemote, commandsRemote, settingsControllerRemote, accountRemote,
       goalsRemote, llmRemote, dynamicRemote, scheduleRemote,
       pluginInventoryRemote, pluginManagerRemote, pluginMarketRemote, pluginRegistryProbeRemote,
       messageFeedbackRemote, sessionFeedbackRemote,
@@ -195,9 +198,11 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
       permissionPresetsRemote, subagentsRemote, sessionRemote, jobRemote, workspaceRemote, workspaceFilesRemote, terminalRemote,
       officeToPdfRemote, userQuestionsRemote,
     ]) {
+      active = contribution
       disposers.push(await ctx.remote.$mount(contribution))
     }
   } catch (error) {
+    console.error('[api-remotes] mount failed', (active && active.package) || active, error)
     for (const dispose of disposers.reverse()) await dispose()
     throw error
   }

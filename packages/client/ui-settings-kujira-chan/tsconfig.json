@@ -22,6 +22,15 @@
     },
     {
       "path": "../ui-slots"
+    },
+    {
+      "path": "../../api/remotes/tsconfig.client.json"
+    },
+    {
+      "path": "../../host/kujira-chan"
+    },
+    {
+      "path": "../ui-workspace"
     }
   ]
 }
