@@ -15,6 +15,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import type { AssembleContext, PromptPresentation } from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-api-workspace-controller'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/types'
@@ -39,6 +41,9 @@ const STORE_FILE = 'kujira-personas.json'
 /** Directory segment one persona's workspace hangs under. */
 const PERSONA_ROOT = join('Documents', 'deepseek-harness', 'personas')
 
+/** The persona slot `dsh-persona` shadows too; naming it is what replaces rather than duplicates. */
+const PERSONA_SECTION = 'deployment:persona-prefix'
+
 /** Persisted document shape. */
 interface StoreDocument {
   readonly version: 1
@@ -54,7 +59,7 @@ declare module '@deepseek-ai/cordis' {
 
 /** Host service backing the generated `ctx.remote.kujiraPersona` namespace. */
 export class KujiraPersonaController extends TypertRemoteService {
-  static inject = ['remoteAccess', 'typert', 'workspaceRegistry', 'workspaceController', 'sessionController']
+  static inject = ['remoteAccess', 'typert', 'workspaceRegistry', 'workspaceController', 'sessionController', 'systemPrompt']
 
   private readonly storePath: string
   /** Serializes read-modify-write cycles so two creations cannot drop each other. */
@@ -64,6 +69,8 @@ export class KujiraPersonaController extends TypertRemoteService {
   constructor(ctx: Context) {
     super(ctx, 'kujiraPersonaController', { namespace: 'kujiraPersona' })
     this.storePath = join(homedir(), '.dsh', STORE_FILE)
+    ctx.effect(() => ctx.on('system-prompt/assemble', (assembly, context, next) =>
+      this.injectPersona(assembly, context, next)), 'kujira-chan: persona prompt')
   }
 
   /**
@@ -168,6 +175,40 @@ export class KujiraPersonaController extends TypertRemoteService {
       }
       return { removed: true }
     })
+  }
+
+  /**
+   * Put this assembly's persona prompt into the persona slot of the system prompt.
+   * The waterfall context carries the Agent (its `id` is the Session id), so the
+   * persona is chosen per Session without touching another Session's prompt.
+   * @param assembly - the pre-waterfall assembly.
+   * @param context - the caller's per-assembly context.
+   * @param next - the rest of the waterfall.
+   * @returns the assembly with this Session's persona prompt in the persona slot.
+   */
+  private async injectPersona(
+    _assembly: PromptPresentation,
+    context: AssembleContext,
+    next: () => Promise<PromptPresentation>,
+  ): Promise<PromptPresentation> {
+    const result = await next()
+    const carrier = context as unknown as { agent?: { id?: unknown }, scope?: { id?: unknown } }
+    const candidate = carrier.agent?.id ?? carrier.scope?.id
+    if (typeof candidate !== 'string' || candidate === '') return result
+    let text = ''
+    try {
+      const items = await this.read()
+      text = (items.find(item => item.sessionId === candidate)?.prompt ?? '').trim()
+    } catch {
+      return result
+    }
+    if (text === '') return result
+    const sections = Array.isArray(result.sections) ? [...result.sections] : []
+    const index = sections.findIndex(section => section.name === PERSONA_SECTION)
+    const existing = index === -1 ? undefined : sections[index]
+    if (existing === undefined) sections.unshift({ name: PERSONA_SECTION, text })
+    else sections[index] = { ...existing, text }
+    return { ...result, sections }
   }
 
   /** Run one read-modify-write cycle after every earlier one settled. */

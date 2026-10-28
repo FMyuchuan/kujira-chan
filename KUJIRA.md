@@ -332,5 +332,12 @@ dsh 自身的「新会话」走客户端草稿态，发第一条消息后才写�
 `packages/experimental/liveshare/src/endpoint-classification.ts` 补一行
 `'kujiraPersona/update': 'owner-only'`，否则该包的编译期完整性闸门会拒绝构建。
 
-> 提示词目前**只存储，不生效**。要让它作用于会话，需要把内容写入该人格工作区的
+提示词通过 `dsh-system-prompt` 的装配 waterfall 注入：本服务监听
+`system-prompt/assemble`，从 context 取 Agent（`Agent.id` 即 sessionId），在人格表里
+找到该会话的人格，再把文本写进 `deployment:persona-prefix` 段——与 `dsh-persona` 占用的
+同一个段，所以是替换而非追加。每轮装配都按 sessionId 选取，两个会话不会互相污染。
+
+> 早期版本曾把提示词写入工作区 `AGENTS.md`，那条路径已移除：它走的是
+> `dsh-agent-instructions` 的用户消息注入，权重低于系统提示，且会与 waterfall 重复注入。
+
 > `AGENTS.md`（`dsh-agent-instructions` 会从工作目录向上加载），这一步尚未实现。
