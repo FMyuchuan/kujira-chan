@@ -556,6 +556,7 @@
     { "path": "./packages/host/frontend-static" },
     { "path": "./packages/host/open-in-app" },
     { "path": "./packages/host/plugin-inventory" },
+    { "path": "./packages/host/kujira-chan" },
     { "path": "./packages/boot/plugin-manager" },
     { "path": "./packages/boot/plugin-market" },
     { "path": "./packages/llm/plugin-package-inventory-deepseek" },

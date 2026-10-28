@@ -457,6 +457,10 @@
     - id: ui-settings-kujira-chan
       name: '@deepseek-ai/dsh-client-ui-settings-kujira-chan'
 
+    # Kujira Chan: the maintained persona list and its Remote namespace.
+    - id: kujira-persona
+      name: '@deepseek-ai/dsh-host-kujira-chan'
+
     # Plan control: the composer plan seat over the plan projection + /plan channel.
     - id: ui-plan
       name: '@deepseek-ai/dsh-client-ui-plan'
