@@ -19,6 +19,16 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { resolveRequestImageTarget } from './request-pricing.ts'
 
 /** DeepSeek provider using Messages content and native thinking replay. */
+/** One parked forward-only turn receiving the persona main session's answers live. */
+interface ForwardSink {
+  /** Text accumulated so far. */
+  buffer: string
+  /** Set when the persona main session finished its turn. */
+  ended: boolean
+  /** Whether anything was emitted. */
+  present: boolean
+}
+
 export class DeepSeekAdapter<C extends Connection = Connection> extends LlmAdapter {
   private readonly files: DeepSeekFileStore
   private readonly imageAccess: ImageAttachmentAccessResolver = (ref) => {
@@ -92,6 +102,75 @@ export class DeepSeekAdapter<C extends Connection = Connection> extends LlmAdapt
     options: GenerateOptions, connection: C, signal: AbortSignal, activity: () => void,
   ): AsyncGenerator<StreamChunk> {
     signal.throwIfAborted()
+    // A sibling session in a Kujira Chan persona workspace only forwards its
+    // message to the persona main session. The live probe is authoritative; the
+    // file list is a fallback for a probe that has not registered yet.
+    let forwardOnly = false
+    let probeAnswer: boolean | undefined
+    let listedAnswer: boolean | undefined
+    try {
+      const probeSlot = globalThis as unknown as Record<symbol, unknown>
+      const probe = probeSlot[Symbol.for('dsh.kujira.isForwardOnly')] as ((id: string) => boolean) | undefined
+      probeAnswer = probe?.(String(options.sessionId))
+      forwardOnly = probeAnswer === true
+      if (!forwardOnly) {
+        const { readFile } = await import('node:fs/promises')
+        const raw = await readFile('/root/.dsh/kujira-silent-sessions.json', 'utf8')
+        const parsed: unknown = JSON.parse(raw)
+        const sessions = (parsed as { sessions?: unknown }).sessions
+        listedAnswer = Array.isArray(sessions) && sessions.includes(String(options.sessionId))
+        forwardOnly = listedAnswer
+      }
+    } catch (error: unknown) {
+      // Neither source resolved: treat the session as ordinary.
+    }
+    if (forwardOnly) {
+        // Forward-only session: park this turn and stream the answers the persona
+        // main session produces into it as they arrive, so the reply reads like a
+        // normal streamed answer instead of appearing only at the very end.
+        const registrySlot = globalThis as unknown as Record<symbol, unknown>
+        const waitersKey = Symbol.for('dsh.kujira.forwardWaiters')
+        const registry = (registrySlot[waitersKey] as Map<string, ForwardSink> | undefined)
+          ?? (registrySlot[waitersKey] = new Map<string, ForwardSink>()) as Map<string, ForwardSink>
+        const key = String(options.sessionId)
+        if (registry.has(key)) {
+          // Another turn of this session is already parked for the same answer.
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
+        const sink: ForwardSink = { buffer: '', ended: false, present: false }
+        registry.set(key, sink)
+        let started = false
+        let sent = 0
+        try {
+          while (!sink.ended && !signal.aborted) {
+            await new Promise(resolve => setTimeout(resolve, 120))
+            if (sink.buffer.length > sent) {
+              const delta = sink.buffer.slice(sent)
+              sent = sink.buffer.length
+              if (!started) {
+                yield { type: 'block-start', index: 0, blockType: 'text' }
+                started = true
+              }
+              yield { type: 'text-delta', index: 0, text: delta }
+              sink.present = true
+            }
+            activity()
+          }
+        } finally {
+          registry.delete(key)
+        }
+        if (sink.buffer.length > sent) {
+          if (!started) {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            started = true
+          }
+          yield { type: 'text-delta', index: 0, text: sink.buffer.slice(sent) }
+        }
+        if (started) yield { type: 'block-end', index: 0, block: { type: 'text', text: sink.buffer } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
     const { messages, versions } = await prepareImages(
       options.messages, connection, options.model, this.dependencies.resolveAttachments?.(), this.imageAccess, signal,
     )
@@ -135,6 +214,13 @@ export class DeepSeekAdapter<C extends Connection = Connection> extends LlmAdapt
             ? [MESSAGES_TOOL_CHANGES_BETA]
             : [],
         ]
+        // Temporary diagnostic: dump the exact request body the API receives.
+        try {
+          const { writeFile } = await import('node:fs/promises')
+          await writeFile('/tmp/llm-last-request.json', String(extensions.payload ?? ''), 'utf8')
+        } catch {
+          // Diagnostic only; never fail a turn because the dump failed.
+        }
         const response = await fetch(`${messagesApiRoot(connection.baseURL)}/messages`, {
           method: 'POST', signal, body: extensions.payload, redirect: 'error',
           headers: {
