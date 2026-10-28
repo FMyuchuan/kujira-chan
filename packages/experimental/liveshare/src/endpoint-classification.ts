@@ -94,6 +94,7 @@ export const VIEWER_ENDPOINT_CLASSES = {
   'kujiraPersona/create': 'owner-only', // the Kujira Chan persona list is owner configuration
   'kujiraPersona/drop': 'owner-only', // the Kujira Chan persona list is owner configuration
   'kujiraPersona/list': 'owner-only', // the Kujira Chan persona list is owner configuration
+  'kujiraPersona/update': 'owner-only', // the Kujira Chan persona list is owner configuration
   'account/watch': 'owner-only', // owner account and sign-in; the served page never reads it
   'account/watchExpiry': 'owner-only', // owner account and sign-in; the served page never reads it
   'job/follow': 'owner-only', // owner background jobs

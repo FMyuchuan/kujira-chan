@@ -19,6 +19,8 @@ export interface KujiraChanFace {
   list: () => Promise<readonly KujiraPersona[]>
   /** Create one persona with its workspace and main session. */
   create: (name: string) => Promise<void>
+  /** Replace one persona's maintained prompt. */
+  update: (id: string, prompt: string) => Promise<void>
   /** Forget one persona, applying the caller's cleanup choices. */
   drop: (id: string, options: KujiraDropOptions) => Promise<void>
   /** Reveal one session as the main conversation. */
@@ -36,13 +38,15 @@ const box: React.CSSProperties = {
   border: '1px solid rgba(127,127,127,0.35)', borderRadius: 6,
 }
 
+const rowEnd: React.CSSProperties = { display: 'flex', gap: 8, justifyContent: 'flex-end' }
+
 /**
  * Render the card's one-liner or the persona list, as the Plugins page asks.
  * @param props - the view asked for, locale copy, and the Host operations.
- * @returns the one-liner, or the persona list with its add form and removal dialog.
+ * @returns the one-liner, or the persona list with its add form, prompt editor, and removal dialog.
  */
 export function KujiraChanPage(props: KujiraChanPageProps) {
-  const { t, list, create, drop, openSession } = props
+  const { t, list, create, update, drop, openSession } = props
   const [items, setItems] = useState<readonly KujiraPersona[]>([])
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -50,6 +54,8 @@ export function KujiraChanPage(props: KujiraChanPageProps) {
   const [pending, setPending] = useState<KujiraPersona | undefined>()
   const [deleteWorkspace, setDeleteWorkspace] = useState(false)
   const [archiveSession, setArchiveSession] = useState(true)
+  const [editing, setEditing] = useState<string | undefined>()
+  const [draft, setDraft] = useState('')
 
   const refresh = useCallback(async () => {
     try {
@@ -80,7 +86,27 @@ export function KujiraChanPage(props: KujiraChanPageProps) {
     }
   }
 
+  const startEdit = (persona: KujiraPersona): void => {
+    setPending(undefined)
+    setEditing(persona.id)
+    setDraft(persona.prompt ?? '')
+  }
+
+  const savePrompt = async (id: string): Promise<void> => {
+    setBusy(true)
+    try {
+      await update(id, draft)
+      setEditing(undefined)
+      await refresh()
+    } catch {
+      setError(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const openDialog = (persona: KujiraPersona): void => {
+    setEditing(undefined)
     setPending(persona)
     setDeleteWorkspace(false)
     setArchiveSession(true)
@@ -136,8 +162,16 @@ export function KujiraChanPage(props: KujiraChanPageProps) {
                 <span style={{ fontSize: '0.8em', opacity: 0.7, wordBreak: 'break-all' }}>
                   {t('session')}: {item.sessionId ?? '—'}
                 </span>
+                <span style={{ fontSize: '0.8em', opacity: 0.7 }}>
+                  {t('promptSummary')}: {item.prompt === undefined || item.prompt === ''
+                    ? t('promptEmpty')
+                    : `${item.prompt.slice(0, 40)}${item.prompt.length > 40 ? '…' : ''}`}
+                </span>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <button type="button" disabled={busy} onClick={() => { startEdit(item) }}>
+                  {t('configure')}
+                </button>
                 <button
                   type="button"
                   disabled={busy || item.sessionId === undefined}
@@ -150,6 +184,31 @@ export function KujiraChanPage(props: KujiraChanPageProps) {
                 </button>
               </div>
             </div>
+
+            {editing === item.id && (
+              <div style={{ ...box, marginTop: 8, background: 'rgba(127,127,127,0.06)' }}>
+                <strong>{t('promptTitle')}</strong>
+                <textarea
+                  rows={6}
+                  value={draft}
+                  placeholder={t('promptPlaceholder')}
+                  disabled={busy}
+                  onChange={(event) => { setDraft(event.target.value) }}
+                  style={{
+                    width: '100%', boxSizing: 'border-box', resize: 'vertical',
+                    fontFamily: 'inherit', fontSize: '0.9em', lineHeight: 1.5, padding: 8,
+                  }}
+                />
+                <div style={rowEnd}>
+                  <button type="button" disabled={busy} onClick={() => { setEditing(undefined) }}>
+                    {t('cancel')}
+                  </button>
+                  <button type="button" disabled={busy} onClick={() => { void savePrompt(item.id) }}>
+                    {t('save')}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {pending?.id === item.id && (
               <div style={{ ...box, marginTop: 8, background: 'rgba(127,127,127,0.06)' }}>
@@ -190,7 +249,7 @@ export function KujiraChanPage(props: KujiraChanPageProps) {
                   </label>
                 </div>
 
-                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <div style={rowEnd}>
                   <button type="button" disabled={busy} onClick={() => { setPending(undefined) }}>
                     {t('cancel')}
                   </button>

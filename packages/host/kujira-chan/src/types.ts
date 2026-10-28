@@ -14,6 +14,8 @@ export interface KujiraPersona {
   readonly sessionId?: string
   /** ISO timestamp of registration. */
   readonly createdAt: string
+  /** Persona prompt text the operator maintains. */
+  readonly prompt?: string
 }
 
 /** Complete persona list. */
@@ -45,4 +47,17 @@ export interface PersonaDropRequest {
 /** Result of one removal. */
 export interface PersonaDropValue {
   readonly removed: boolean
+}
+
+/** Update one persona's maintained prompt. */
+export interface PersonaUpdateRequest {
+  /** Persona identity. */
+  readonly id: string
+  /** New prompt text; an empty string clears it. */
+  readonly prompt: string
+}
+
+/** Result of one update. */
+export interface PersonaUpdateValue {
+  readonly persona: KujiraPersona
 }

@@ -322,3 +322,15 @@ dsh 自身的「新会话」走客户端草稿态，发第一条消息后才写�
 > cookie 的 audience 必须与 `requestAudience()` 的校验形状一致：HTTPS 监听器写
 > `url.origin`（`https://host:port`），HTTP 写 `url.host`。签发时若直接存裸 `Host` 头，
 > HTTPS 下永远匹配不上，登录会看似成功却仍然停在登录页。
+
+### 人格提示词的编辑
+
+每个人格卡片有「配置」按钮，展开后可编辑该人格的提示词，保存写入
+`~/.dsh/kujira-personas.json` 的 `prompt` 字段（可选字段，旧记录没有也能读）。
+
+对应 Remote 方法 `kujiraPersona/update`。新增 Remote 端点时还要在
+`packages/experimental/liveshare/src/endpoint-classification.ts` 补一行
+`'kujiraPersona/update': 'owner-only'`，否则该包的编译期完整性闸门会拒绝构建。
+
+> 提示词目前**只存储，不生效**。要让它作用于会话，需要把内容写入该人格工作区的
+> `AGENTS.md`（`dsh-agent-instructions` 会从工作目录向上加载），这一步尚未实现。

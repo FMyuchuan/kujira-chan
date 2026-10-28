@@ -59,6 +59,13 @@ export function apply(ctx: ClientContext): void {
         throw new Error('kujira persona create failed')
       }
     },
+    update: async (id, prompt) => {
+      const result = await ctx.remote.kujiraPersona.update({ id, prompt })
+      if (!result.ok) {
+        console.error('[kujira-chan] update rejected', result.error)
+        throw new Error('kujira persona update failed')
+      }
+    },
     drop: async (id, options) => {
       const result = await ctx.remote.kujiraPersona.drop({
         id,

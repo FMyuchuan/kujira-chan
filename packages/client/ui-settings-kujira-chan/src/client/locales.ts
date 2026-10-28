@@ -7,6 +7,7 @@ export type KujiraChanLocaleKey =
   | 'workspace' | 'session' | 'listTitle' | 'openSession'
   | 'dropTitle' | 'dropDeleteWorkspace' | 'dropDeleteWorkspaceHint' | 'dropSessions'
   | 'dropKeepSessions' | 'dropArchiveSessions' | 'confirm' | 'cancel'
+  | 'configure' | 'promptTitle' | 'promptPlaceholder' | 'promptSummary' | 'promptEmpty' | 'save'
 
 /** English copy. */
 export const en: Record<KujiraChanLocaleKey, string> = {
@@ -31,6 +32,12 @@ export const en: Record<KujiraChanLocaleKey, string> = {
   dropArchiveSessions: 'Archive them',
   confirm: 'Remove',
   cancel: 'Cancel',
+  configure: 'Configure',
+  promptTitle: 'Persona prompt',
+  promptPlaceholder: 'Describe who this persona is and how it should answer.',
+  promptSummary: 'Prompt',
+  promptEmpty: 'not set',
+  save: 'Save',
 }
 
 /** Simplified Chinese copy. */
@@ -56,4 +63,10 @@ export const zh: Record<KujiraChanLocaleKey, string> = {
   dropArchiveSessions: '归档',
   confirm: '移除',
   cancel: '取消',
+  configure: '配置',
+  promptTitle: '人格提示词',
+  promptPlaceholder: '描述这个人格是谁、应该怎么回答。',
+  promptSummary: '提示词',
+  promptEmpty: '未设置',
+  save: '保存',
 }

@@ -27,6 +27,8 @@ import type {
   PersonaListValue,
   PersonaDropRequest,
   PersonaDropValue,
+  PersonaUpdateRequest,
+  PersonaUpdateValue,
 } from './types.ts'
 
 export type * from './types.ts'
@@ -106,6 +108,26 @@ export class KujiraPersonaController extends TypertRemoteService {
       }
       const items = [...await this.read(), persona]
       await this.write(items)
+      return { persona }
+    })
+  }
+
+  /**
+   * Replace one persona's maintained prompt.
+   * @param request - the persona identity and its new prompt text.
+   * @returns the updated persona.
+   */
+  @Remote('update')
+  update(request: PersonaUpdateRequest): Promise<PersonaUpdateValue> {
+    return this.exclusive(async () => {
+      const items = await this.read()
+      const index = items.findIndex(item => item.id === request.id)
+      const current = items[index]
+      if (current === undefined) throw new Error(`unknown persona ${JSON.stringify(request.id)}`)
+      const persona: KujiraPersona = { ...current, prompt: request.prompt }
+      const next = [...items]
+      next[index] = persona
+      await this.write(next)
       return { persona }
     })
   }
