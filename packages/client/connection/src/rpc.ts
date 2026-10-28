@@ -218,6 +218,21 @@ export interface HostConnectionHandle {
   readonly allowsRemoteAuthorities: boolean
 
   /**
+   * Mint the browser-session cookie for one password submitted on the sign-in page.
+   * @param authority - request audience the cookie is bound to.
+   * @param password - the submitted password.
+   * @returns the Set-Cookie value, or undefined when the password is rejected.
+   */
+  issueLoginCookie(authority: string, password: string): string | undefined
+
+  /**
+   * Render the standalone sign-in document.
+   * @param failed - whether the previous attempt was rejected.
+   * @returns a complete HTML document.
+   */
+  loginPage(failed: boolean): string
+
+  /**
    * Compose exact Fetch routes and the shared-channel RPC interceptor.
    * @param channel - shared channel mounted by Connection.
    * @returns Fetch handler for trusted, authenticated requests.

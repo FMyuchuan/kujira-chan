@@ -13,7 +13,7 @@ import { clientRequestSchema } from './rpc-schema.ts'
 import { bridge } from './http-bridge.ts'
 import { isRemoteAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { API_PATH } from './api-path.ts'
-import type { BrowserAuth } from './browser-auth.ts'
+import { loginPageDocument, type BrowserAuth } from './browser-auth.ts'
 import { Peer } from './peer.ts'
 import type {
   PeerAdmission,
@@ -192,6 +192,25 @@ export class HostConnectionService extends Service implements HostConnectionHand
    */
   authorizeIndex(request: ConnectionIndexRequest, response: ConnectionIndexResponse): boolean {
     return this.browserAuth.authorizeIndex(request, response, this.ctx.get('webServer')?.protocol === 'https:')
+  }
+
+  /**
+   * Mint the browser-session cookie for one password submitted on the sign-in page.
+   * @param authority - request audience the cookie is bound to.
+   * @param password - the submitted password.
+   * @returns the Set-Cookie value, or undefined when the password is rejected.
+   */
+  issueLoginCookie(authority: string, password: string): string | undefined {
+    return this.browserAuth.issueSession(authority, password, this.ctx.get('webServer')?.protocol === 'https:')
+  }
+
+  /**
+   * Render the standalone sign-in document.
+   * @param failed - whether the previous attempt was rejected.
+   * @returns a complete HTML document.
+   */
+  loginPage(failed: boolean): string {
+    return loginPageDocument(failed)
   }
 
   /** Add this process's launch token to the clean application URL. */

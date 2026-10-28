@@ -92,7 +92,7 @@ function bytesBody(bytes: Uint8Array): ReadableStream<Uint8Array> {
  */
 async function serveStatic(
   request: Request, distRoot: string, distIndex: string,
-  authorizeIndex: () => Response | undefined,
+  authorizeIndex: () => Response | undefined | Promise<Response | undefined>,
   renderIndex: (html: string) => string,
 ): Promise<Response> {
   const target = resolve(normalize(join(distRoot, decodeURIComponent(new URL(request.url).pathname))))
@@ -104,7 +104,7 @@ async function serveStatic(
   let headers: Record<string, string>
   try {
     if (target === distRoot || target === distIndex) {
-      const refusal = authorizeIndex()
+      const refusal = await authorizeIndex()
       if (refusal !== undefined) return refusal
       body = renderIndex(await readFile(distIndex, 'utf8'))
       headers = { 'content-type': HTML_MIME }
@@ -136,7 +136,7 @@ export function apply(ctx: Context, config: Config): void {
   // Connection's browser authentication writes the token exchange's 303 or
   // the 401 through a writeHead/end response; capture it as a Fetch response.
   // The answer stays a 401 unless Connection writes another one.
-  const authorizeIndex = (request: Request): Response | undefined => {
+  const authorizeIndex = async (request: Request): Promise<Response | undefined> => {
     let status = 401
     let headers = new Headers()
     let body: string | undefined
@@ -149,6 +149,31 @@ export function apply(ctx: Context, config: Config): void {
     })
     return admitted ? undefined : new Response(body, { status, headers })
   }
+  // The sign-in form posts here. An exact route answers any method, which the
+  // GET/HEAD-only fallback seat cannot, so the exchange needs no webserver change.
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/login',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { allow: 'POST' }).end()
+        return
+      }
+      const chunks: Buffer[] = []
+      for await (const chunk of req) chunks.push(chunk as Buffer)
+      const password = new URLSearchParams(Buffer.concat(chunks).toString('utf8')).get('password') ?? ''
+      const authority = req.headers.host ?? undefined
+      const cookie = authority === undefined ? undefined : ctx.connection.issueLoginCookie(authority, password)
+      if (cookie === undefined) {
+        res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(ctx.connection.loginPage(true))
+        return
+      }
+      res.writeHead(303, { 'location': './', 'set-cookie': cookie, 'cache-control': 'no-store' })
+      res.end()
+    },
+  }), 'frontend-static: sign-in route')
+
   ctx.effect(() => ctx.webServer.registerFallback({
     resource: (request, peer) => serveStatic(
       request,

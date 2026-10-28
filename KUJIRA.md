@@ -294,3 +294,31 @@ ln -sfn ../../../../host/kujira-chan packages/bundle/web-app/node_modules/@deeps
 `sessionQuery.listSessions()`（磁盘记录），而尚未产生任何事件的空会话不落盘。
 dsh 自身的「新会话」走客户端草稿态，发第一条消息后才写入，所以没有可复用的空白行。
 人格卡片上提供了「打开主会话」入口作为替代路径。
+
+## 登录页
+
+未认证访问不再弹出浏览器原生的 Basic Auth 对话框，而是返回一个独立登录页
+（`DSH_WEB_PASSWORD` 未设置时行为不变，仍是 401）。
+
+流程：
+
+| 步骤 | 结果 |
+|---|---|
+| `GET /` 无 cookie | `200` 返回登录页 HTML |
+| `POST /login` 密码错误 | `401` 重新渲染登录页并提示 |
+| `POST /login` 密码正确 | `303` 到 `./`，下发签名 cookie |
+| 带 cookie 访问 `/` | 正常返回 Web UI |
+
+实现分三处：
+
+- `packages/client/connection/src/browser-auth.ts`
+  `loginPageDocument()` 提供 HTML；`issueSession()` 校验密码并签发与 token 路径相同的 cookie
+- `packages/client/connection/src/rpc-host.ts` + `rpc.ts`
+  在 `HostConnectionHandle` 上暴露 `issueLoginCookie()` / `loginPage()`
+- `packages/host/frontend-static/src/index.ts`
+  注册 exact `/login` 路由处理 POST。不能用 fallback 座位：`WebRoute` 的 fallback 只接受
+  GET/HEAD，POST 会被 webserver 以 405 拒绝
+
+> cookie 的 audience 必须与 `requestAudience()` 的校验形状一致：HTTPS 监听器写
+> `url.origin`（`https://host:port`），HTTP 写 `url.host`。签发时若直接存裸 `Host` 头，
+> HTTPS 下永远匹配不上，登录会看似成功却仍然停在登录页。

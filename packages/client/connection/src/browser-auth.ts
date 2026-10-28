@@ -16,8 +16,8 @@ const DAY_MILLISECONDS = 24 * 60 * 60 * 1000
 const SECRET_BYTES = 32
 const TOKEN_QUERY = 'token'
 const BASIC_PREFIX = 'Basic '
-const BASIC_REALM = 'DeepSeek Harness'
 const PASSWORD_VARIABLE = 'DSH_WEB_PASSWORD'
+const LOGIN_PATH = '/login'
 const COOKIE_PREFIX = 'dsh-auth-'
 const COOKIE_PAYLOAD_VERSION = 1
 const STORED_SECRET_VERSION = 1
@@ -114,6 +114,70 @@ function tokenMatches(actual: string, expected: string): boolean {
   const actualBytes = Buffer.from(actual, 'utf8')
   const expectedBytes = Buffer.from(expected, 'utf8')
   return actualBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(actualBytes, expectedBytes)
+}
+
+/**
+ * Render the standalone sign-in document the browser sees instead of the Web UI.
+ * The form posts to {@link LOGIN_PATH}; a failed attempt re-renders it with a note.
+ * @param failed - whether the previous attempt was rejected.
+ * @returns a complete HTML document.
+ */
+export function loginPageDocument(failed: boolean): string {
+  const notice = failed
+    ? '<p class="notice">密码不正确，请重试。</p>'
+    : ''
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kujira Chan</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1b1c1e; padding: 24px;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #151517; color: #ececf1; }
+    .card { background: #1e1f22 !important; border-color: #303136 !important; box-shadow: none !important; }
+    input { background: #151517 !important; color: #ececf1 !important; border-color: #3a3b40 !important; }
+    button { background: #ececf1 !important; color: #151517 !important; }
+  }
+  .card {
+    width: 100%; max-width: 380px; background: #fff; border: 1px solid #e3e5e9; border-radius: 14px;
+    padding: 28px 26px; box-shadow: 0 10px 30px rgba(15,18,25,.07);
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .2px; }
+  p.sub { margin: 0 0 20px; font-size: 13px; opacity: .6; }
+  label { display: block; font-size: 13px; margin: 14px 0 6px; opacity: .85; }
+  input {
+    width: 100%; padding: 10px 12px; font-size: 15px; border: 1px solid #d6d9df;
+    border-radius: 9px; background: #fbfbfc; color: inherit; outline: none;
+  }
+  input:focus { border-color: #4d6bfe; box-shadow: 0 0 0 3px rgba(77,107,254,.15); }
+  button {
+    width: 100%; margin-top: 20px; padding: 11px 12px; font-size: 15px; font-weight: 600;
+    border: 0; border-radius: 9px; background: #1b1c1e; color: #fff; cursor: pointer;
+  }
+  button:hover { opacity: .9; }
+  .notice { margin: 12px 0 0; font-size: 13px; color: #d33; }
+</style>
+</head>
+<body>
+  <form class="card" method="post" action="${LOGIN_PATH}">
+    <h1>Kujira Chan</h1>
+    <p class="sub">请输入访问密码</p>
+    <label for="password">密码</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
+    ${notice}
+    <button type="submit">登录</button>
+  </form>
+</body>
+</html>
+`
 }
 
 /** Compare two secrets without leaking length or prefix through comparison timing. */
@@ -417,6 +481,31 @@ export class BrowserAuth {
   }
 
   /**
+   * Verify one submitted password and mint the browser-session cookie for it.
+   * @param host - the request's Host header.
+   * @param password - the submitted password.
+   * @param secure - whether the listener serves TLS.
+   * @returns the Set-Cookie value, or undefined when the password is wrong or none is configured.
+   */
+  issueSession(host: string, password: string, secure: boolean): string | undefined {
+    const expected = configuredPassword()
+    if (expected === undefined || !secretMatches(password, expected)) return undefined
+    // Bind the cookie to the same audience shape requestAudience() verifies:
+    // an HTTPS listener's origin, otherwise the bare host.
+    const parsed = new URL(`${secure ? 'https:' : 'http:'}//${host}`)
+    const authority = secure ? parsed.origin : parsed.host
+    const issuedAt = Date.now()
+    const expiresAt = issuedAt + this.maxAgeMilliseconds
+    const value = encodeCookie({
+      version: COOKIE_PAYLOAD_VERSION,
+      authority,
+      issuedAt,
+      expiresAt,
+    }, this.secret)
+    return sessionCookie(cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), secure)
+  }
+
+  /**
    * Verify the authority-bound browser cookie on a Host request.
    * @param request - request headers carrying Host and Cookie.
    * @param secure - whether the receiving listener uses TLS, including its default port.
@@ -452,14 +541,21 @@ export class BrowserAuth {
   }
 
   private writeUnauthorized(req: ConnectionIndexRequest, res: ConnectionIndexResponse): void {
-    const headers: Record<string, string> = {
+    const url = new URL(req.url ?? '/', 'http://dsh.invalid')
+    // With a configured password the browser gets a real page instead of a
+    // Basic-auth dialog, so the exchange no longer depends on browser chrome.
+    if (basicAuthenticationEnabled() && req.method === 'GET' && url.pathname === '/') {
+      res.writeHead(200, {
+        'cache-control': 'no-store',
+        'content-type': 'text/html; charset=utf-8',
+      })
+      res.end(loginPageDocument(false))
+      return
+    }
+    res.writeHead(401, {
       'cache-control': 'no-store',
       'content-type': 'text/plain; charset=utf-8',
-    }
-    if (basicAuthenticationEnabled()) {
-      headers['www-authenticate'] = `${BASIC_PREFIX}realm="${BASIC_REALM}"`
-    }
-    res.writeHead(401, headers)
+    })
     res.end(req.method === 'HEAD'
       ? undefined
       : basicAuthenticationEnabled()
