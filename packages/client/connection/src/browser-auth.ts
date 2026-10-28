@@ -15,7 +15,6 @@ const AUTH_RECORD_KEY = credentialKey('client-connection', 'browser-session')
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1000
 const SECRET_BYTES = 32
 const TOKEN_QUERY = 'token'
-const BASIC_PREFIX = 'Basic '
 const PASSWORD_VARIABLE = 'DSH_WEB_PASSWORD'
 const LOGIN_PATH = '/login'
 const COOKIE_PREFIX = 'dsh-auth-'
@@ -181,6 +180,15 @@ export function loginPageDocument(failed: boolean): string {
 }
 
 /** Compare two secrets without leaking length or prefix through comparison timing. */
+/**
+ * Derive the per-authority cookie name.
+ * @param authority - bound request audience.
+ * @returns the cookie name for that authority.
+ */
+function cookieName(authority: string): string {
+  return COOKIE_PREFIX + encodeBase64Url(createHash('sha256').update(authority).digest())
+}
+
 function secretMatches(actual: string, expected: string): boolean {
   const actualDigest = createHash('sha256').update(actual, 'utf8').digest()
   const expectedDigest = createHash('sha256').update(expected, 'utf8').digest()
@@ -202,29 +210,6 @@ function basicAuthenticationEnabled(): boolean {
   return configuredPassword() !== undefined
 }
 
-/**
- * Decode one `Authorization: Basic` header and compare its password field.
- * The user name is informational: the realm protects a single server identity.
- */
-function basicAuthorizationAccepted(headers: ConnectionTrustRequest['headers']): boolean {
-  const expected = configuredPassword()
-  if (expected === undefined) return false
-  const raw = header(headers, 'authorization')
-  if (raw === undefined || !raw.startsWith(BASIC_PREFIX)) return false
-  let decoded: string
-  try {
-    decoded = Buffer.from(raw.slice(BASIC_PREFIX.length).trim(), 'base64').toString('utf8')
-  } catch {
-    return false
-  }
-  const separator = decoded.indexOf(':')
-  if (separator === -1) return false
-  return secretMatches(decoded.slice(separator + 1), expected)
-}
-
-function cookieName(authority: string): string {
-  return COOKIE_PREFIX + encodeBase64Url(createHash('sha256').update(authority).digest())
-}
 
 /** Read the exact generated cookie without implementing general Cookie decoding. */
 function cookieValue(headerValue: string, name: string): string | undefined {
@@ -372,30 +357,6 @@ export class BrowserAuth {
   authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse, secure = false): boolean {
     /* v8 ignore next -- node:http always supplies url on server requests. */
     const url = new URL(req.url ?? '/', 'http://dsh.invalid')
-    if (req.method === 'GET' && url.pathname === '/' && basicAuthorizationAccepted(req.headers)) {
-      const authority = requestAudience(req.headers, secure)
-      if (authority !== undefined) {
-        if (this.isAuthenticated(req, secure)) return true
-        const issuedAt = Date.now()
-        const expiresAt = issuedAt + this.maxAgeMilliseconds
-        const value = encodeCookie({
-          version: COOKIE_PAYLOAD_VERSION,
-          authority,
-          issuedAt,
-          expiresAt,
-        }, this.secret)
-        res.writeHead(303, {
-          'cache-control': 'no-store',
-          'location': './',
-          'referrer-policy': 'no-referrer',
-          'set-cookie': sessionCookie(
-            cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000), secure,
-          ),
-        })
-        res.end()
-        return false
-      }
-    }
     const tokens = url.searchParams.getAll(TOKEN_QUERY)
     if (tokens.length > 0) {
       const authority = requestAudience(req.headers, secure)
