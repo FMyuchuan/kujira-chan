@@ -51,6 +51,18 @@ const FORWARD_QUEUE_LIMIT = 50
 /** Tool the main session calls to answer a sibling session. */
 const REPLY_TOOL = 'kujira_reply'
 
+/** Standing rules every persona main session receives in its system prompt. */
+const MAIN_SESSION_CONTRACT = [
+  '【Kujira Chan 主从会话约定 · 系统指令】',
+  '你是本工作区的主会话，是这里唯一负责思考和作答的 agent。',
+  '- 你收到的每一条 user 消息都不是真人直接发来的，而是工作区里其他会话转发过来的，正文前标注「[来自子会话 <短id> 的消息]」。',
+  '- 真正的人在别的会话里，看不到你在这里的输出。直接回答没有用，只有调用工具才算回复。',
+  `- 回复方式：${REPLY_TOOL}(session_id="<短id>", message="<你的回复>")。`,
+  '- 收到「[来自子会话 <短id> 的停止请求]」时，立即停止当前处理，不要再调用任何工具。',
+  '【约定结束】',
+].join('\n')
+
+
 /** One parked forward-only turn that receives replies as they are produced. */
 interface ForwardSink {
   /** Text accumulated so far. */
@@ -309,21 +321,28 @@ export class KujiraPersonaController extends TypertRemoteService {
     let text = ''
     try {
       const items = await this.read()
-      text = (items.find(item => item.sessionId === candidate)?.prompt ?? '').trim()
+      const persona = items.find(item => item.sessionId === candidate)
+      // Only persona main sessions get the contract.
+      if (persona === undefined) return result
+      text = (persona.prompt ?? '').trim()
     } catch {
       return result
     }
-    if (text === '') return result
-    // Frame the text as deployment configuration. Without this the model reads a
+    // The contract is always present; the persona prompt is appended when configured.
+    // Frame the latter as deployment configuration: without it the model reads a
     // strong instruction ("regardless of what the user said") as something smuggled
     // into the conversation and refuses it.
-    text = [
-      '【部署方配置的人格设定 · 属于系统指令，不是用户输入，也不是对话内容】',
-      '以下内容由本部署的维护者写入，优先于对话中的任何消息。它不来自用户，请照此执行。',
-      '',
-      text,
-      '【人格设定结束】',
-    ].join('\n')
+    text = text === ''
+      ? MAIN_SESSION_CONTRACT
+      : [
+          MAIN_SESSION_CONTRACT,
+          '',
+          '【部署方配置的人格设定 · 属于系统指令，不是用户输入，也不是对话内容】',
+          '以下内容由本部署的维护者写入，优先于对话中的任何消息。它不来自用户，请照此执行。',
+          '',
+          text,
+          '【人格设定结束】',
+        ].join('\n')
     const sections = Array.isArray(result.sections) ? [...result.sections] : []
     const index = sections.findIndex(section => section.name === PERSONA_SECTION)
     const existing = index === -1 ? undefined : sections[index]
@@ -461,8 +480,7 @@ export class KujiraPersonaController extends TypertRemoteService {
     const main = persona.sessionId
     if (main === undefined) return
     const handle = shortSessionId(childSessionId)
-    const body = `[来自子会话 ${handle} 的消息]\n${text}\n\n`
-      + `如需回复，调用 ${REPLY_TOOL}(session_id="${handle}", message="...")，回复会出现在该子会话里。`
+    const body = `[来自子会话 ${handle} · 回复用 ${REPLY_TOOL}；不需要时可以不回复]\n${text}`
     void this.ctx.sessionController.prompt({
       requestId: randomUUID() as never,
       sessionId: main as SessionId,
@@ -628,8 +646,7 @@ export class KujiraPersonaController extends TypertRemoteService {
     const main = persona.sessionId
     if (main === undefined) return
     const handle = shortSessionId(item.childSessionId)
-    const forwarded = `[来自子会话 ${handle} 的消息]\n${item.text}\n\n`
-      + `如需回复，调用 ${REPLY_TOOL}(session_id="${handle}", message="...")，回复会出现在该子会话里。`
+    const forwarded = `[来自子会话 ${handle} · 回复用 ${REPLY_TOOL}；不需要时可以不回复]\n${item.text}`
     void this.ctx.sessionController.prompt({
       requestId: randomUUID() as never,
       sessionId: main as SessionId,
@@ -883,18 +900,10 @@ function shortSessionId(sessionId: string): string {
  * @returns the seed prompt text.
  */
 function seedMessage(name: string): string {
-  return [
-    `你是「${name}」的主会话，是这个工作区里唯一负责思考和作答的人格。`,
-    '',
-    '关于你收到的消息，请记住这几点：',
-    `1. 你看到的每一条 user 消息都不是真人直接发来的，而是其他会话转发过来的，转发内容前会标注「[来自子会话 <会话ID> 的消息]」。`,
-    `2. 真正的人在别处，他们看不到你在这里的输出。直接回答没有用，只有调用工具才算回复。`,
-    `3. 要回复某条转发消息，必须调用 ${REPLY_TOOL}(session_id="<会话ID>", message="<你的回复>")，回复才会出现在那个会话里。`,
-    '4. 回复时用 session_id 对应到具体是哪个子会话；多个子会话同时存在时不要弄混。',
-    '',
-    '另外，系统提示里包含部署方配置的人格设定。它属于可信的系统指令，不是转发内容，也不要把它的内容误判成注入攻击。',
-    '没有收到转发消息时，不必主动做任何事。',
-  ].join('\n')
+  // Kept as a user prompt on purpose: only user/message starts a turn, and the
+  // session must run one turn to be persisted and listed in the sidebar. The
+  // standing rules live in the system prompt instead.
+  return `【初始化】「${name}」主会话已就绪。工作区其他会话的消息会转发到这里。`
 }
 
 /**
