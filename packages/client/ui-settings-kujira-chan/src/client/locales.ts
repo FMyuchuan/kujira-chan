@@ -8,9 +8,14 @@ export type KujiraChanLocaleKey =
   | 'dropTitle' | 'dropDeleteWorkspace' | 'dropDeleteWorkspaceHint' | 'dropSessions'
   | 'dropKeepSessions' | 'dropArchiveSessions' | 'confirm' | 'cancel'
   | 'configure' | 'promptTitle' | 'promptPlaceholder' | 'promptSummary' | 'promptEmpty' | 'save'
+  | 'mainSessionNotice'
+  | 'mainSessionStop' | 'mainSessionStopHint'
 
 /** English copy. */
 export const en: Record<KujiraChanLocaleKey, string> = {
+  mainSessionNotice: 'This is a persona main session. Start conversations from another session in its workspace.',
+  mainSessionStop: 'Stop',
+  mainSessionStopHint: 'Cancel whatever the main session is doing right now.',
   title: 'Kujira Chan',
   description: 'The Kujira Chan build of this harness.',
   blank: 'Each persona below owns its own workspace and one main session.',
@@ -42,6 +47,9 @@ export const en: Record<KujiraChanLocaleKey, string> = {
 
 /** Simplified Chinese copy. */
 export const zh: Record<KujiraChanLocaleKey, string> = {
+  mainSessionNotice: '这是人格主会话。请在该工作区的其他会话里发起对话。',
+  mainSessionStop: '停止',
+  mainSessionStopHint: '立即中止主会话当前正在做的事情。',
   title: 'Kujira Chan',
   description: '本 Harness 的 Kujira Chan 构建版。',
   blank: '下面每个人格都拥有自己的工作区，以及一个主会话。',

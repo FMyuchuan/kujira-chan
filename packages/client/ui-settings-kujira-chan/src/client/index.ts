@@ -17,10 +17,22 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: the generated kujiraPersona Remote namespace.
 import type {} from '@deepseek-ai/dsh-host-kujira-chan/remote'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { ComposerChainProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { KujiraChanPage, type KujiraChanFace } from './KujiraChanPage.tsx'
+import { MainSessionNotice } from './MainSessionNotice.tsx'
 import { en, zh, type KujiraChanLocaleKey } from './locales.ts'
 
 export type { KujiraChanFace, KujiraChanPageProps, KujiraDropOptions } from './KujiraChanPage.tsx'
+
+/** Props of the main-session composer takeover. */
+export interface MainSessionNoticeProps {
+  /** Selector payload naming the main session in view. */
+  matched: { readonly notice: true, readonly sessionId: string }
+  /** Locale lookup bound to this plugin's namespace. */
+  t: (key: KujiraChanLocaleKey) => string
+  /** Cancel whatever the main session is currently doing. */
+  stop: (sessionId: string) => void
+}
 export type { KujiraChanLocaleKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -34,13 +46,39 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const NS = 'settings.kujiraChan'
 
 /** Required services (cordis fiber inject). */
-export const inject = ['slots', 'locale', 'remote', 'remote.kujiraPersona', 'uiWorkspace']
+export const inject = ['slots', 'locale', 'remote', 'remote.kujiraPersona', 'remote.session', 'uiWorkspace']
 
 /**
  * Mount the Kujira Chan card on the Plugins page.
  * @param ctx - the browser plugin context.
  */
 export function apply(ctx: ClientContext): void {
+  // Main sessions refuse direct input. The set is refreshed whenever the page
+  // changes personas, and once at startup to cover existing ones.
+  const mainSessions = new Set<string>()
+  const refreshMainSessions = (): void => {
+    void ctx.remote.kujiraPersona.list().then((result) => {
+      if (!result.ok) return
+      mainSessions.clear()
+      for (const item of result.value.items) {
+        if (item.sessionId !== undefined) mainSessions.add(String(item.sessionId))
+      }
+    }).catch(() => undefined)
+  }
+  refreshMainSessions()
+  ctx.effect(() => ctx.slots.inject('conversation.composer', () => ctx.slots.register({
+    name: 'conversation.composer',
+    priority: 10,
+    select: ({ sessionId }: ComposerChainProps) => sessionId !== undefined && mainSessions.has(String(sessionId))
+      ? { notice: true as const, sessionId: String(sessionId) }
+      : null,
+    locale: NS,
+    inject: () => ({
+      stop: (sessionId: string) => {
+        void ctx.remote.session.cancel({ sessionId: sessionId as never } as never).catch(() => undefined)
+      },
+    }),
+  }, MainSessionNotice)), 'ui-settings-kujira-chan: main session composer')
   ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'ui-settings-kujira-chan: dictionaries')
   const t = ctx.locale.bind(NS)
   const face: KujiraChanFace = {
@@ -58,6 +96,7 @@ export function apply(ctx: ClientContext): void {
         console.error('[kujira-chan] create rejected', result.error)
         throw new Error('kujira persona create failed')
       }
+      refreshMainSessions()
     },
     update: async (id, prompt) => {
       const result = await ctx.remote.kujiraPersona.update({ id, prompt })
@@ -72,6 +111,7 @@ export function apply(ctx: ClientContext): void {
         deleteWorkspace: options.deleteWorkspace,
         archiveSession: options.archiveSession,
       })
+      refreshMainSessions()
       if (!result.ok) {
         console.error('[kujira-chan] drop rejected', result.error)
         throw new Error('kujira persona drop failed')

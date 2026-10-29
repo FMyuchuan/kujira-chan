@@ -290,10 +290,80 @@ ln -sfn ../../../../host/kujira-chan packages/bundle/web-app/node_modules/@deeps
 
 ### 已知限制
 
-主会话不出现在侧栏的会话列表里。`ApiSessionList.list` 只遍历
-`sessionQuery.listSessions()`（磁盘记录），而尚未产生任何事件的空会话不落盘。
-dsh 自身的「新会话」走客户端草稿态，发第一条消息后才写入，所以没有可复用的空白行。
-人格卡片上提供了「打开主会话」入口作为替代路径。
+主会话创建后会收到一条种子 `user` 消息（说明「你看到的 user 只是转发器、回复必须
+调用 `kujira_reply`」），因此它会落盘并出现在侧栏；早期版本因为空会话不落盘而看不到
+主会话，该问题随种子消息一并消失。代价是创建人格时会触发一次模型调用。
+
+子会话的挂起轮**不设时间上限**，只有两种结束方式：主会话回复，或用户取消。
+若主会话因故完全不回复，子会话会一直停在思考态，需要在主会话界面点「停止」。
+
+### 主从会话：其他会话的消息如何进入主会话
+
+每个人格的主会话是唯一**真正调用模型**的会话。同一工作区里的其他会话（子会话）
+只负责接收用户输入，把消息交给主会话，再把答案呈现出来——它们自己不消耗 token。
+
+```text
+子会话发消息
+  → Host 入队（按人格串行）
+  → 主会话收到「[来自子会话 xxxxxxxx 的消息] …」
+  → 主会话调用 kujira_reply(session_id, message)
+  → 回复流式写回子会话那一轮
+```
+
+**转发与静默**
+
+`packages/host/kujira-chan` 监听 `agent/inbox/spliced` 与 `session/event`，命中人格工作区的
+非主会话时把消息入队，并注册一个**实时探针**：
+
+```ts
+sharedSlot[Symbol.for('dsh.kujira.isForwardOnly')] = (sessionId) => { /* cwd + personas */ }
+```
+
+`packages/llm/llm-deepseek/src/adapter.ts` 在每次请求前调用它。命中时该轮**不发请求**，
+挂起等待；探测是同步判断的，不依赖任何标记文件的写入时序。
+
+> 早先用「写一个静默会话列表文件、adapter 读文件」实现，会输给竞态：子会话自己的
+> 模型请求常常在标记落盘前就已发出。文件列表仍保留为兜底。
+
+**挂起与流式回复**
+
+挂起的轮在共享 Map `dsh.kujira.forwardWaiters` 上登记一个 sink，每 120 ms 把新增文本
+作为 `text-delta` 吐出。因此 `kujira_reply` **调用一次就投递一次**，但子会话里始终是
+同一条消息在增长，最终仍是一段完整回复。
+
+主会话 `turn/end` 时 Host 把 sink 标记为结束；若那一轮已被插话消耗掉，则改为追加
+一条独立消息，保证答案不丢。
+
+**插话与停止**
+
+| 场景 | 行为 |
+|---|---|
+| 主会话仍在处理，子会话又发消息 | `prompt(mode: 'steer')` 插进当前轮，同时把该消息从子会话 inbox 摘掉，并把前面那个挂起轮结束掉，让回复落在两条消息之后 |
+| 主会话已调用过 `kujira_reply`（收尾中） | 进队列，等这一轮结束再处理 |
+| 在子会话点停止 | 给主会话 steer 一条「用户已停止」，**让模型自己收手**，不使用 `cancel` |
+
+**主会话的输入**
+
+主会话的 composer 被 Client 插件接管（`conversation.composer` chain slot），
+只显示一行说明加一个「停止」按钮。停止按钮调用 `remote.session.cancel`，
+用作主从链路异常时的应急出口。
+
+**会话 ID 的短写法**
+
+转发给主会话的是 8 位短 id（`session-<uuid>` 的 uuid 前 8 位），工具收到后由 Host
+解析回完整会话；传完整 id 或唯一前缀也能识别。
+
+**跨包耦合点**
+
+| 包 | 角色 |
+|---|---|
+| `packages/host/kujira-chan` | 队列、转发、探针注册、回复投递、`kujira_reply` 工具 |
+| `packages/llm/llm-deepseek/src/adapter.ts` | 静默判断、挂起循环、把回复作为本轮流式输出 |
+| `packages/client/ui-settings-kujira-chan` | 人格页、主会话 composer 接管、停止按钮 |
+
+三者通过 `globalThis` 上的两个 symbol 通信：
+`Symbol.for('dsh.kujira.isForwardOnly')`（探针）与
+`Symbol.for('dsh.kujira.forwardWaiters')`（sink 表）。
 
 ## 登录页
 
