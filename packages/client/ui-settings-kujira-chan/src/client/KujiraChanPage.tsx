@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { KujiraPersona } from '@deepseek-ai/dsh-host-kujira-chan/types'
+import type { KujiraPersona, KujiraWakeup } from '@deepseek-ai/dsh-host-kujira-chan/types'
 
 /** Cleanup choices confirmed in the removal dialog. */
 export interface KujiraDropOptions {
@@ -25,6 +25,8 @@ export interface KujiraChanFace {
   drop: (id: string, options: KujiraDropOptions) => Promise<void>
   /** Reveal one session as the main conversation. */
   openSession: (sessionId: string) => void
+  /** Pending self-scheduled wakeups across personas. */
+  listWakeups: () => Promise<readonly KujiraWakeup[]>
 }
 
 /** Props the renderer binds for the Kujira Chan page. */
@@ -46,8 +48,9 @@ const rowEnd: React.CSSProperties = { display: 'flex', gap: 8, justifyContent: '
  * @returns the one-liner, or the persona list with its add form, prompt editor, and removal dialog.
  */
 export function KujiraChanPage(props: KujiraChanPageProps) {
-  const { t, list, create, update, drop, openSession } = props
+  const { t, list, create, update, drop, openSession, listWakeups } = props
   const [items, setItems] = useState<readonly KujiraPersona[]>([])
+  const [wakeups, setWakeups] = useState<readonly KujiraWakeup[]>([])
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(false)
@@ -59,12 +62,14 @@ export function KujiraChanPage(props: KujiraChanPageProps) {
 
   const refresh = useCallback(async () => {
     try {
-      setItems(await list())
+      const [nextItems, nextWakeups] = await Promise.all([list(), listWakeups()])
+      setItems(nextItems)
+      setWakeups(nextWakeups)
       setError(false)
     } catch {
       setError(true)
     }
-  }, [list])
+  }, [list, listWakeups])
 
   useEffect(() => {
     if (props.view === 'page') void refresh()
@@ -167,6 +172,11 @@ export function KujiraChanPage(props: KujiraChanPageProps) {
                     ? t('promptEmpty')
                     : `${item.prompt.slice(0, 40)}${item.prompt.length > 40 ? '…' : ''}`}
                 </span>
+                {wakeups.filter(wakeup => wakeup.personaId === item.id).map(wakeup => (
+                  <span key={wakeup.id} style={{ fontSize: '0.8em', opacity: 0.7 }}>
+                    ⏰ {new Date(wakeup.at).toLocaleString()} {wakeup.reason}
+                  </span>
+                ))}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <button type="button" disabled={busy} onClick={() => { startEdit(item) }}>

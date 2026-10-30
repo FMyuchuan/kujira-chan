@@ -61,3 +61,20 @@ export interface PersonaUpdateRequest {
 export interface PersonaUpdateValue {
   readonly persona: KujiraPersona
 }
+
+/** One self-scheduled wakeup of a persona main session. */
+export interface KujiraWakeup {
+  /** Wakeup identity, usable with the kujira_wake cancel argument. */
+  readonly id: string
+  /** Owning persona. */
+  readonly personaId: string
+  /** Absolute epoch milliseconds when it fires. */
+  readonly at: number
+  /** What the session asked to be reminded about. */
+  readonly reason: string
+}
+
+/** Response of the wakeup listing endpoint. */
+export interface PersonaWakeupListValue {
+  readonly items: readonly KujiraWakeup[]
+}

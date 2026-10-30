@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -24,6 +24,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session'
 import type {
+  KujiraWakeup,
+  PersonaWakeupListValue,
   KujiraPersona,
   PersonaCreateRequest,
   PersonaCreateValue,
@@ -63,6 +65,8 @@ const MAIN_SESSION_CONTRACT = [
   `- 回复方式：${REPLY_TOOL}(session_id="<短id>", message="<你的回复>")。`,
   `- 默认不引用对方原消息；确实需要指代某一句时，给 ${REPLY_TOOL} 带上 quote=true。`,
   '- 收到「[来自子会话 <短id> 的停止请求]」时，立即停止当前处理，不要再调用任何工具。',
+  '- 你可以用 kujira_persona_prompt 查看或改写自己的人格提示词：不传 prompt 是查看，传 prompt 是改写。',
+  '- 需要过一会儿自己再行动时，用 kujira_wake 安排一次唤醒：给 in（如 10m、2h）或 at（ISO 时间），可带 reason 说明到点要做什么。',
   '【约定结束】',
 ].join('\n')
 
@@ -119,12 +123,20 @@ export class KujiraPersonaController extends TypertRemoteService {
   ]
 
   private readonly storePath: string
+  /** Schedule file for self-wakeups that survive a restart. */
+  private readonly wakeupPath: string
   /** Serializes read-modify-write cycles so two creations cannot drop each other. */
   private tail: Promise<unknown> = Promise.resolve()
   /** Last read persona list, so the synchronous event observer can match a workspace. */
   private personasCache: readonly KujiraPersona[] = []
   /** Message ids already forwarded, so inbox and transcript events cannot double-send. */
   private readonly seenMessages = new Set<string>()
+  /** Pending self-wakeups for this process: id -> timer and what to wake with. */
+  private readonly wakeups = new Map<string, { timer: NodeJS.Timeout, at: number, reason: string, personaId: string }>()
+  /** Interrupts steered into a main session, keyed by child session, awaiting consumption. */
+  private readonly awaitingSteer = new Map<string, { personaId: string, text: string }>()
+  /** Turn each persona's main session is currently running, absent when it is idle. */
+  private readonly runningTurn = new Map<string, number>()
   /** Replies waiting for their sibling's parked turn to end before they are appended. */
   private readonly pendingReplies = new Map<string, string>()
   /** Short handle to full Session id, so the model never has to repeat a 46-char id. */
@@ -136,11 +148,13 @@ export class KujiraPersonaController extends TypertRemoteService {
   constructor(ctx: Context) {
     super(ctx, 'kujiraPersonaController', { namespace: 'kujiraPersona' })
     this.storePath = join(homedir(), '.dsh', STORE_FILE)
+    this.wakeupPath = join(homedir(), '.dsh', 'kujira-wakeups.json')
     // The adapter parks on this map, so it must exist before any turn starts.
     const shared = globalThis as unknown as Record<symbol, unknown>
     const waitersKey = Symbol.for('dsh.kujira.forwardWaiters')
     shared[waitersKey] ??= new Map<string, () => void>()
     this.personasCache = this.readSync()
+    this.restoreWakeups()
     // A fresh process owns no parked turns, so every silent marker is stale.
     try {
       writeFileSync(join(homedir(), '.dsh', 'kujira-silent-sessions.json'),
@@ -169,6 +183,8 @@ export class KujiraPersonaController extends TypertRemoteService {
       this.observe(session, event)
     }), 'kujira-chan: forward sibling prompts')
     ctx.effect(() => ctx.tools.register(this.replyTool()), 'kujira-chan: reply tool')
+    ctx.effect(() => ctx.tools.register(this.personaPromptTool()), 'kujira-chan: persona prompt tool')
+    ctx.effect(() => ctx.tools.register(this.wakeTool()), 'kujira-chan: wake tool')
   }
 
   /**
@@ -178,6 +194,22 @@ export class KujiraPersonaController extends TypertRemoteService {
   @Remote('list')
   async list(): Promise<PersonaListValue> {
     return { items: await this.read() }
+  }
+
+  /**
+   * List self-scheduled wakeups of persona main sessions.
+   * @returns every pending wakeup across personas.
+   */
+  @Remote('wakeups')
+  async listWakeups(): Promise<PersonaWakeupListValue> {
+    return {
+      items: [...this.wakeups.entries()].map(([id, entry]): KujiraWakeup => ({
+        id,
+        personaId: entry.personaId,
+        at: entry.at,
+        reason: entry.reason,
+      })),
+    }
   }
 
   /**
@@ -389,6 +421,8 @@ export class KujiraPersonaController extends TypertRemoteService {
     }
     if (event.type === 'turn/start') {
       this.noteTurnStart(session, event)
+      const persona = this.personasCache.find(item => item.sessionId === session.id)
+      if (persona !== undefined) this.runningTurn.set(persona.id, (event.data as { turn: number }).turn)
       return
     }
     if (event.type === 'turn/end') {
@@ -399,11 +433,27 @@ export class KujiraPersonaController extends TypertRemoteService {
     if (event.type !== 'user/message') return
     const message = event.data as { id?: unknown, source?: { kind?: unknown }, content?: unknown }
     if (message.source?.kind !== 'user') return
+    // Did the main session just take in one of our steered interrupts?
+    {
+      const mainPersona = this.personasCache.find(item => item.sessionId === session.id)
+      if (mainPersona !== undefined && this.awaitingSteer.size > 0) {
+        const consumed = this.eventText(event)
+        for (const [childId, entry] of this.awaitingSteer) {
+          if (entry.personaId !== mainPersona.id) continue
+          if (!consumed.includes(entry.text.slice(0, 160))) continue
+          this.awaitingSteer.delete(childId)
+          // The interrupt is now in the main session's history: let the sibling
+          // leave its current step so the next one can carry the answer.
+          this.release(childId)
+          break
+        }
+      }
+    }
     // The inbox handler forwards steer input first; drop the transcript echo.
     if (typeof message.id === 'string' && this.seenMessages.has(message.id)) return
     const text = this.eventText(event)
     if (text === '') return
-    this.forwardText(session, text, typeof message.id === 'string' ? message.id : undefined)
+    this.forwardText(session, text)
   }
 
   /**
@@ -430,7 +480,7 @@ export class KujiraPersonaController extends TypertRemoteService {
         .map(part => part.text)
         .join('')
         .trim()
-      if (text !== '') this.forwardText(session, text, message.id)
+      if (text !== '') this.forwardText(session, text)
     }
   }
 
@@ -439,7 +489,7 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param session - the sibling session that received the message.
    * @param text - the message text.
    */
-  private forwardText(session: Session, text: string, messageId?: string): void {
+  private forwardText(session: Session, text: string): void {
     const sessionId = session.id as string
     const cwd = (session.header as { cwd?: unknown } | undefined)?.cwd
     if (typeof cwd !== 'string' || cwd === '') return
@@ -451,19 +501,16 @@ export class KujiraPersonaController extends TypertRemoteService {
     this.shortIds.set(shortSessionId(sessionId), sessionId)
     const queue = this.stateOf(persona.id)
     const active = queue.active
-    if (active?.childSessionId === sessionId && active.replied !== true) {
+    const mainBusy = this.runningTurn.has(persona.id)
+    if (active?.childSessionId === sessionId && mainBusy) {
       // Interrupt while the main session is still working: steer the new text in
       // so the running turn sees it at its next step and adjusts its answer.
       active.text = `${active.text}\n${text}`
+      // Steer the new text into the main session's running turn. Do NOT settle the
+      // sibling's current step here: its answer belongs to that step, and ending it
+      // early would leave the reply with nowhere to land. The queued message stays
+      // in the sibling's inbox so its next step picks it up as its own message.
       this.steer(persona, sessionId, text)
-      // Drop the message from the sibling's own inbox. Otherwise its running turn
-      // keeps consuming it and spends model calls of its own on text that only the
-      // persona main session should answer.
-      if (messageId !== undefined) this.dropQueued(sessionId, messageId)
-      // End the sibling's earlier parked turn so the turn carrying this new
-      // message is the one that receives the answer: the reply then lands after
-      // both messages instead of above the second one.
-      this.release(sessionId)
       return
     }
     const waiting = queue.waiting.find(item => item.childSessionId === sessionId)
@@ -481,21 +528,6 @@ export class KujiraPersonaController extends TypertRemoteService {
   }
 
   /**
-   * Remove one queued message from a sibling session's inbox.
-   * @param sessionId - the sibling session.
-   * @param messageId - the queued message identity.
-   */
-  private dropQueued(sessionId: string, messageId: string): void {
-    void this.ctx.sessionController.updateQueue({
-      sessionId: sessionId as SessionId,
-      itemId: messageId as never,
-      action: { kind: 'remove' },
-    } as never).catch(() => {
-      // The message may already have been consumed; that needs no cleanup.
-    })
-  }
-
-  /**
    * Steer one sibling message into the main session's running turn.
    * @param persona - the owning persona.
    * @param childSessionId - the sibling that sent it.
@@ -506,12 +538,15 @@ export class KujiraPersonaController extends TypertRemoteService {
     if (main === undefined) return
     const handle = shortSessionId(childSessionId)
     const body = `[来自子会话 ${handle} · 回复用 ${REPLY_TOOL}；不需要时可以不回复]\n${text}`
+    this.awaitingSteer.set(childSessionId, { personaId: persona.id, text: body })
     void this.ctx.sessionController.prompt({
       requestId: randomUUID() as never,
       sessionId: main as SessionId,
       mode: 'steer',
       content: [{ type: 'text', text: body }],
-    } as never, AbortSignal.timeout(30_000)).catch(() => undefined)
+    } as never, AbortSignal.timeout(30_000)).catch(() => {
+      this.awaitingSteer.delete(childSessionId)
+    })
   }
 
   /**
@@ -840,6 +875,222 @@ export class KujiraPersonaController extends TypertRemoteService {
   }
 
   /**
+   * Build the tool that lets a persona main session schedule a wakeup for itself.
+   * @returns the tool definition registered on the tools service.
+   */
+  private wakeTool() {
+    const controller = this
+    return defineTool({
+      name: 'kujira_wake',
+      description: 'Schedule this persona main session to wake itself up at a later time. '
+        + 'Pass `in` (such as "10m", "2h", "90s") or `at` (ISO 8601 timestamp). '
+        + 'When it fires, the session receives a prompt so it can act on its own.',
+      parameters: {
+        in: { type: 'string', description: 'Relative delay such as 10m, 2h, 90s.' },
+        at: { type: 'string', description: 'Absolute ISO 8601 time, e.g. 2026-10-30T16:00:00+08:00.' },
+        reason: { type: 'string', description: 'What to remind yourself about when woken.' },
+        cancel: { type: 'string', description: 'Id of a scheduled wakeup to cancel instead of creating one.' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            id: { type: 'string', required: true },
+            at: { type: 'string', required: true },
+            cancelled: { type: 'boolean', required: true },
+          },
+        },
+        render: (args: { id: string, at: string, cancelled: boolean }) => [{
+          type: 'text',
+          text: args.cancelled ? `已取消唤醒 ${args.id}。` : `已安排在 ${args.at} 唤醒。`,
+        }],
+      },
+      async execute(
+        args: { in?: string, at?: string, reason?: string, cancel?: string },
+        exec: { agent?: { session?: { id?: unknown } } },
+      ) {
+        const sessionId = String(exec?.agent?.session?.id ?? '')
+        const persona = await controller.personaOfMainSession(sessionId)
+        if (persona === undefined) throw new Error('这个会话不是人格主会话，不能设置唤醒')
+        if (args.cancel !== undefined) {
+          const removed = controller.cancelWakeup(args.cancel)
+          if (!removed) throw new Error(`没有等待中的唤醒 ${JSON.stringify(args.cancel)}`)
+          return { id: args.cancel, at: '', cancelled: true }
+        }
+        const delay = parseDelay(args)
+        if (delay === undefined) throw new Error('需要给出 in（如 10m）或 at（ISO 时间）')
+        const at = Date.now() + delay
+        const id = randomUUID()
+        controller.scheduleWakeup(id, persona.id, at, args.reason ?? '')
+        return { id, at: new Date(at).toISOString(), cancelled: false }
+      },
+    })
+  }
+
+  /**
+   * Arm one wakeup timer and record it so a restart can re-arm it.
+   * @param id - wakeup identity.
+   * @param personaId - persona to wake.
+   * @param at - absolute epoch milliseconds.
+   * @param reason - wakeup text.
+   */
+  private scheduleWakeup(id: string, personaId: string, at: number, reason: string): void {
+    const delay = Math.max(0, at - Date.now())
+    const timer = setTimeout(() => {
+      this.wakeups.delete(id)
+      void this.persistWakeups()
+      const persona = this.personasCache.find(item => item.id === personaId)
+      if (persona !== undefined) {
+        void this.wake(persona, reason === '' ? '（到点了，这是你自己安排的唤醒。）' : reason)
+      }
+    }, delay)
+    timer.unref?.()
+    this.wakeups.set(id, { timer, at, reason, personaId })
+    void this.persistWakeups()
+    // A restarted process may hold wakeups that came due while it was down.
+    if (delay === 0) void Promise.resolve()
+  }
+
+  /**
+   * Cancel one armed wakeup.
+   * @param id - wakeup identity.
+   * @returns whether it was pending.
+   */
+  private cancelWakeup(id: string): boolean {
+    const entry = this.wakeups.get(id)
+    if (entry === undefined) return false
+    clearTimeout(entry.timer)
+    this.wakeups.delete(id)
+    void this.persistWakeups()
+    return true
+  }
+
+  /** Write the pending wakeups so a restart can re-arm them. */
+  private async persistWakeups(): Promise<void> {
+    try {
+      await mkdir(join(homedir(), '.dsh'), { recursive: true })
+      const items = [...this.wakeups.entries()].map(([id, entry]) => ({
+        id, personaId: entry.personaId, at: entry.at, reason: entry.reason,
+      }))
+      const temporary = `${this.wakeupPath}.${randomUUID()}.tmp`
+      await writeFile(temporary, `${JSON.stringify({ items }, null, 2)}\n`, { mode: 0o600 })
+      await rename(temporary, this.wakeupPath)
+    } catch {
+      // A lost schedule file only costs the wakeup across a restart.
+    }
+  }
+
+  /** Re-arm wakeups that were pending before this process started. */
+  private restoreWakeups(): void {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.wakeupPath, 'utf8'))
+      const items = (parsed as { items?: unknown }).items
+      if (!Array.isArray(items)) return
+      const now = Date.now()
+      for (const raw of items) {
+        if (typeof raw !== 'object' || raw === null) continue
+        const item = raw as { id?: unknown, personaId?: unknown, at?: unknown, reason?: unknown }
+        if (typeof item.id !== 'string' || typeof item.personaId !== 'string' || typeof item.at !== 'number') continue
+        // Overdue wakeups fire right away so the session still learns about them.
+        this.scheduleWakeup(item.id, item.personaId, Math.max(item.at, now), typeof item.reason === 'string' ? item.reason : '')
+      }
+    } catch {
+      // No schedule file yet.
+    }
+  }
+
+  /**
+   * Deliver one self-scheduled wakeup into the persona main session.
+   * @param persona - the persona to wake.
+   * @param reason - what the wakeup is about.
+   */
+  private async wake(persona: KujiraPersona, reason: string): Promise<void> {
+    const main = persona.sessionId
+    if (main === undefined) return
+    try {
+      await this.ctx.sessionController.prompt({
+        requestId: randomUUID() as never,
+        sessionId: main as SessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text: `[定时唤醒] ${reason}` }],
+      } as never, AbortSignal.timeout(30_000))
+    } catch {
+      // A wakeup that cannot be delivered is dropped; the session keeps running.
+    }
+  }
+
+  /**
+   * Build the tool that lets a persona main session read or rewrite its own
+   * persona prompt (the text injected into its system prompt each turn).
+   * @returns the tool definition registered on the tools service.
+   */
+  private personaPromptTool() {
+    const controller = this
+    return defineTool({
+      name: 'kujira_persona_prompt',
+      description: 'Read or rewrite this persona\'s system prompt. Omit `prompt` to read the current text; '
+        + 'pass it to replace the prompt. Only the persona main session may use this.',
+      parameters: {
+        prompt: { type: 'string', description: 'New persona prompt. Omit to read the current one.' },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            prompt: { type: 'string', required: true },
+            updated: { type: 'boolean', required: true },
+          },
+        },
+        render: (args: { prompt: string, updated: boolean }) => [{
+          type: 'text',
+          text: args.updated ? '人格提示词已更新。' : '当前人格提示词已返回。',
+        }],
+      },
+      async execute(args: { prompt?: string }, exec: { agent?: { session?: { id?: unknown } } }) {
+        const sessionId = String(exec?.agent?.session?.id ?? '')
+        const persona = await controller.personaOfMainSession(sessionId)
+        if (persona === undefined) {
+          throw new Error('这个会话不是人格主会话，不能修改人格提示词')
+        }
+        if (args.prompt === undefined) return { prompt: persona.prompt ?? '', updated: false }
+        await controller.savePersonaPrompt(persona.id, args.prompt)
+        return { prompt: args.prompt, updated: true }
+      },
+    })
+  }
+
+  /**
+   * Resolve the persona this session is the main session of.
+   * @param sessionId - the calling session.
+   * @returns the persona, or undefined when the session is not a main session.
+   */
+  private async personaOfMainSession(sessionId: string): Promise<KujiraPersona | undefined> {
+    const items = await this.read()
+    return items.find(item => item.sessionId === sessionId)
+  }
+
+  /**
+   * Persist a new prompt for one persona and refresh the synchronous cache the
+   * system-prompt waterfall reads.
+   * @param id - persona identity.
+   * @param prompt - new prompt text (may be empty to clear it).
+   */
+  private async savePersonaPrompt(id: string, prompt: string): Promise<void> {
+    await this.exclusive(async () => {
+      const items = await this.read()
+      const index = items.findIndex(item => item.id === id)
+      const current = items[index]
+      if (current === undefined) throw new Error(`unknown persona ${JSON.stringify(id)}`)
+      const next = [...items]
+      next[index] = { ...current, prompt }
+      await this.write(next)
+      this.personasCache = next
+    })
+  }
+
+  /**
    * Build the tool the main session uses to answer a sibling session.
    * @returns the tool definition registered on the tools service.
    */
@@ -912,6 +1163,32 @@ export class KujiraPersonaController extends TypertRemoteService {
     const { rename } = await import('node:fs/promises')
     await rename(temporary, this.storePath)
   }
+}
+
+/**
+ * Resolve a wakeup delay from either a relative duration or an absolute time.
+ * @param args - tool arguments.
+ * @returns milliseconds from now, or undefined when neither form parses.
+ */
+function parseDelay(args: { in?: string, at?: string }): number | undefined {
+  if (typeof args.in === 'string' && args.in.trim() !== '') {
+    const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?$/iu.exec(args.in.trim())
+    if (match !== null) {
+      const amount = Number(match[1])
+      const unit = (match[2] ?? 'm').toLowerCase()
+      const scale = unit === 'ms' ? 1 : unit === 's' ? 1000 : unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : 86_400_000
+      const delay = amount * scale
+      if (Number.isFinite(delay) && delay > 0) return delay
+    }
+  }
+  if (typeof args.at === 'string' && args.at.trim() !== '') {
+    const target = Date.parse(args.at.trim())
+    if (Number.isFinite(target)) {
+      const delay = target - Date.now()
+      if (delay > 0) return delay
+    }
+  }
+  return undefined
 }
 
 /**

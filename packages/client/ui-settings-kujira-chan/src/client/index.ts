@@ -101,6 +101,14 @@ export function apply(ctx: ClientContext): void {
         throw new Error('kujira persona update failed')
       }
     },
+    listWakeups: async () => {
+      const result = await ctx.remote.kujiraPersona.wakeups()
+      if (!result.ok) {
+        console.error('[kujira-chan] wakeups rejected', result.error)
+        throw new Error('kujira persona wakeups failed')
+      }
+      return result.value.items
+    },
     drop: async (id, options) => {
       const result = await ctx.remote.kujiraPersona.drop({
         id,
