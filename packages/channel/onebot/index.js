@@ -348,9 +348,12 @@ export function apply(ctx, rawConfig) {
 
   /** 把一段话发回 QQ。引用触发它的那条（配置可关）。 */
   async function reply(message, text) {
-    const clean = sanitizeOutgoing(text)
+    // A leading zero-width space means the answering side asked not to quote.
+    const raw = String(text ?? '')
+    const noQuote = raw.startsWith('\u200b')
+    const clean = sanitizeOutgoing(noQuote ? raw.slice(1) : raw)
     if (!clean) return
-    const replyTo = config.quoteReply ? message.messageId : undefined
+    const replyTo = config.quoteReply && !noQuote ? message.messageId : undefined
     try {
       await api.send(message.key, clean, { replyTo })
       stat.replied += 1

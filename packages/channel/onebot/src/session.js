@@ -16,7 +16,7 @@
  *      `get_msg` 去捞；同一条 5 分钟内只捞一次，免得有人连点把接口打成风暴。
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { normalizeSegments } from './cq.js'
 import { sameMsgId, shortGroupName } from './event.js'
 
@@ -30,6 +30,21 @@ export function sessionKeyOf(message) {
   if (!message) return ''
   if (message.scope === 'group') return `group:${message.groupId}`
   return `private:${message.userId}`
+}
+
+/**
+ * 会话 key → 稳定的 session id。
+ *
+ * 用确定性 id 而不是 randomUUID：插件重启后同一个私聊/群聊还能接回原来的会话，
+ * 否则每次重启都算新会话。加上 `session-` 前缀，dsh 侧才能把它缩成短 id。
+ * @param {string} key 会话 key（`group:<群号>` / `private:<QQ号>`）
+ * @returns {string} `session-<uuid 形式>` 的稳定 id
+ */
+export function sessionIdForKey(key) {
+  const hex = createHash('sha256').update(String(key)).digest('hex')
+  const variant = ((parseInt(hex.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, '0')
+  const version = ((parseInt(hex.slice(12, 14), 16) & 0x0f) | 0x40).toString(16).padStart(2, '0')
+  return `session-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${version}${hex.slice(14, 16)}-${variant}${hex.slice(18, 20)}-${hex.slice(20, 32)}`
 }
 
 /**
@@ -416,7 +431,7 @@ export function createAgentPool(options) {
     const found = sessions.get(key)
     if (found) return found
     if (closed) throw new Error('插件已经卸载了，不再新建会话')
-    const sessionId = randomUUID()
+    const sessionId = sessionIdForKey(key)
     let presetId = ''
     let setup
     const presets = typeof ctx.get === 'function' ? ctx.get('agentPresets') : undefined
