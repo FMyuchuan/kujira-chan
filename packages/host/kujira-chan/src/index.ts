@@ -901,9 +901,9 @@ export class KujiraPersonaController extends TypertRemoteService {
             cancelled: { type: 'boolean', required: true },
           },
         },
-        render: (args: { id: string, at: string, cancelled: boolean }) => [{
+        render: (_args: { cancel?: string }, value: { id: string, at: string, cancelled: boolean }) => [{
           type: 'text',
-          text: args.cancelled ? `已取消唤醒 ${args.id}。` : `已安排在 ${args.at} 唤醒。`,
+          text: value.cancelled ? `已取消唤醒 ${value.id}。` : `已安排在 ${value.at} 唤醒。`,
         }],
       },
       async execute(
@@ -1043,9 +1043,9 @@ export class KujiraPersonaController extends TypertRemoteService {
             updated: { type: 'boolean', required: true },
           },
         },
-        render: (args: { prompt: string, updated: boolean }) => [{
+        render: (_args: { prompt?: string }, value: { prompt: string, updated: boolean }) => [{
           type: 'text',
-          text: args.updated ? '人格提示词已更新。' : '当前人格提示词已返回。',
+          text: value.updated ? '人格提示词已更新。' : '当前人格提示词已返回。',
         }],
       },
       async execute(args: { prompt?: string }, exec: { agent?: { session?: { id?: unknown } } }) {
