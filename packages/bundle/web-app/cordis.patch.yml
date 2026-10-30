@@ -458,6 +458,46 @@
     - id: kujira-persona
       name: '@deepseek-ai/dsh-host-kujira-chan'
 
+    # Durable per-workspace memory (third-party, MIT).
+    - id: workspace-memory
+      name: '@flowingspring/dsh-workspace-memory'
+      config:
+        checkpointTurns: 10
+        checkpointChars: 4000
+        idleCheckpointMs: 300000
+        consolidateEvery: 5
+
+    # QQ channel over OneBot 11 (third-party, MIT).
+    - id: onebot
+      name: dsh-onebot
+      config:
+        ws: ws://127.0.0.1:3001/onebot/v11/ws
+        http: ''
+        accessToken: ''
+        selfId: ''
+        groups: []
+        private: false
+        users: []
+        requireMention: true
+        quoteReply: true
+        imageLinks: false
+        format: array
+        tz: Asia/Shanghai
+        debug: false
+        queue:
+          max: 5
+          timeoutMs: 180000
+        timeouts:
+          callMs: 15000
+          readyMs: 10000
+        reconnect:
+          enabled: true
+          baseMs: 1000
+          maxMs: 60000
+          factor: 2
+          jitter: 0.2
+          quietAfter: 5
+
     # Plan control: the composer plan seat over the plan projection + /plan channel.
     - id: ui-plan
       name: '@deepseek-ai/dsh-client-ui-plan'
