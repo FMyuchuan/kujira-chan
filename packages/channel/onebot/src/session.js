@@ -454,6 +454,26 @@ export function createAgentPool(options) {
     rec.toolId = ''
   }
 
+  /**
+   * Put a session under the Workspace that owns the configured directory, so it
+   * shows up next to the persona's other sessions instead of "ungrouped".
+   * Runtime-created sessions are not adopted by the startup bootstrap, so the
+   * channel attaches them itself. Failure only costs grouping, never delivery.
+   * @param sessionId 要归组的会话
+   */
+  async function attachToWorkspace(sessionId) {
+    try {
+      const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : undefined
+      if (registry !== undefined && cwd) {
+        let workspace = registry.list().find(candidate => candidate.path === cwd)
+        if (workspace === undefined) workspace = await registry.create(cwd)
+        await workspace.attachSession(sessionId)
+      }
+    } catch (e) {
+      log('会话归组失败（不影响收发）：', e?.message ?? String(e))
+    }
+  }
+
   async function ensureSession(key) {
     const found = sessions.get(key)
     if (found) return found
@@ -508,26 +528,14 @@ export function createAgentPool(options) {
           ...(setup ? { setup } : {}),
         })
         idStore?.set(key, fresh)
+        // The fallback used to skip grouping, which is why those sessions landed
+        // under "ungrouped"; attach here as well.
+        await attachToWorkspace(fresh)
         sessions.set(key, { sessionId: fresh, agent: handle.agent, handle, buf: '', answerFrom: 0, toolCalling: false, step: 0, toolId: '', busy: false })
         return sessions.get(key)
       }
     }
-    // Put the session under the Workspace that owns this working directory, so it
-    // shows up next to the persona's other sessions instead of "ungrouped".
-    // Runtime-created sessions are not adopted by the startup bootstrap, so the
-    // channel has to attach them itself.
-    try {
-      const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : undefined
-      if (registry !== undefined && cwd) {
-        let workspace = registry.list().find(candidate => candidate.path === cwd)
-        if (workspace === undefined) workspace = await registry.create(cwd)
-        await workspace.attachSession(sessionId)
-      }
-    } catch (e) {
-      // Never block the channel on grouping: a session without a workspace still
-      // works, it just shows under "ungrouped".
-      log('会话归组失败（不影响收发）：', e?.message ?? String(e))
-    }
+    await attachToWorkspace(sessionId)
 
     idStore?.set(key, sessionId)
     const rec = {
