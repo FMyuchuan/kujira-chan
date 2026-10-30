@@ -1,6 +1,6 @@
 # Kujira Chan
 
-**Kujira Chan**（鲸鱼娘）是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的个人分支，在一台低配云主机上长期运行。它保留了上游的插件化架构，另加了一层「人格」模型：一个主会话负责思考，同工作区的其他会话和 QQ 通道把消息交给它处理。
+**Kujira Chan**（鲸鱼娘）是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的个人分支。它保留了上游的插件化架构，另加了一层「人格」模型：一个主会话负责思考，同工作区的其他会话和 QQ 通道把消息交给它处理。
 
 上游原始 README 保留在 [README.upstream.md](README.upstream.md)，中文版在 [README.zh.md](README.zh.md)。
 部署细节、踩过的坑和恢复清单在 [KUJIRA.md](KUJIRA.md)。
@@ -61,7 +61,7 @@
 
 - Node.js ≥ 24.9
 - pnpm 11（通过 corepack）
-- Linux（本分支验证于 Alibaba Cloud Linux 3 / 2 vCPU / 1.8 GiB RAM）
+- Linux
 
 ### 构建
 
@@ -83,7 +83,7 @@ pnpm run build:lib:client
 pnpm run build:web
 ```
 
-**低内存主机**：聚合的 `tsc -b` 会 OOM。用逐项目编译代替——`bash /tmp/build-seq.sh` 之类的脚本按 `tsconfig.host.json` / `tsconfig.client.json` 的 references 逐个编译，峰值约 250 MB。
+聚合的 `tsc -b` 会一次性拉起所有项目；机器吃紧时可以改成逐项目编译：按 `tsconfig.host.json` / `tsconfig.client.json` 的 references 一个个 `tsc -b`，峰值内存低得多。
 
 ### 运行
 
@@ -123,7 +123,6 @@ Environment=DSH_WEB_PASSWORD=<password>
 - 主会话一次只处理一条消息，多个会话同时说话会排队
 - 子会话的挂起轮没有时间上限（只在主会话回复或取消时结束）
 - 唤醒任务按进程调度，重启后从 `~/.dsh/kujira-wakeups.json` 恢复；停机期间到点的会在启动时立刻补发
-- 低内存主机构建时必须逐项目编译，聚合构建会 OOM
 
 ---
 
