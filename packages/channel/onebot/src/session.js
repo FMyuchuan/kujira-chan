@@ -377,8 +377,16 @@ export function createAgentPool(options) {
     for (const rec of sessions.values()) {
       if (rec.agent?.sessionId !== agentId && rec.agent?.id !== agentId) continue
       if (frame?.type === 'chunk' && frame.chunk?.type === 'text-delta') {
+        const before = rec.buf.length
         rec.buf += frame.chunk.text
         rec.toolCalling = false
+        // One forwarded reply arrives as one delta; send it right away instead of
+        // waiting for the whole turn. Deltas that belong to tool-calling chatter
+        // (before answerFrom) are not answers and stay unsent.
+        if (typeof rec.onChunk === 'function' && before >= (rec.answerFrom ?? 0)) {
+          const text = frame.chunk.text.trim()
+          if (text !== '') void rec.onChunk(text)
+        }
       } else if (frame?.type === 'chunk' && frame.chunk?.type === 'tool-call-delta') {
         // 新的一步工具调用：把「要发给用户的那段」的起点推到当前缓冲末尾 ——
         // 它之前说的是干活时的碎话，不算回复
@@ -430,6 +438,23 @@ export function createAgentPool(options) {
       agentOptions: { ...(provider ? { provider } : {}), ...(model ? { model } : {}) },
       ...(setup ? { setup } : {}),
     })
+    // Put the session under the Workspace that owns this working directory, so it
+    // shows up next to the persona's other sessions instead of "ungrouped".
+    // Runtime-created sessions are not adopted by the startup bootstrap, so the
+    // channel has to attach them itself.
+    try {
+      const registry = typeof ctx.get === 'function' ? ctx.get('workspaceRegistry') : undefined
+      if (registry !== undefined && cwd) {
+        let workspace = registry.list().find(candidate => candidate.path === cwd)
+        if (workspace === undefined) workspace = await registry.create(cwd)
+        await workspace.attachSession(sessionId)
+      }
+    } catch (e) {
+      // Never block the channel on grouping: a session without a workspace still
+      // works, it just shows under "ungrouped".
+      log('会话归组失败（不影响收发）：', e?.message ?? String(e))
+    }
+
     const rec = {
       key,
       sessionId,
@@ -465,10 +490,17 @@ export function createAgentPool(options) {
     }
   }
 
+  /** 设置某会话的流式发送回调（dispatchOne 期间有效） */
+  function setChunkSink(key, sink) {
+    const rec = sessions.get(key)
+    if (rec) rec.onChunk = sink
+  }
+
   return {
     sessions,
     ensureSession,
     answer,
+    setChunkSink,
     resetTurn,
     disposeKey,
     async disposeAll() {

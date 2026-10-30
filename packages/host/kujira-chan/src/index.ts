@@ -301,6 +301,24 @@ export class KujiraPersonaController extends TypertRemoteService {
   }
 
   /**
+   * Find the persona whose workspace contains a session's working directory.
+   * External channels (OneBot and friends) get their own directory under the
+   * persona workspace, so the prefix match binds them to that persona.
+   * @param sessionId - the session being assembled.
+   * @param items - the current persona list.
+   * @returns the persona, or undefined when the session is outside every workspace.
+   */
+  private personaForWorkspace(
+    sessionId: string,
+    items: readonly KujiraPersona[],
+  ): KujiraPersona | undefined {
+    const session = this.ctx.sessions.get(sessionId as SessionId)
+    const cwd = (session?.header as { cwd?: unknown } | undefined)?.cwd
+    if (typeof cwd !== 'string' || cwd === '') return undefined
+    return items.find(item => cwd === item.workspacePath || cwd.startsWith(`${item.workspacePath}/`))
+  }
+
+  /**
    * Put this assembly's persona prompt into the persona slot of the system prompt.
    * The waterfall context carries the Agent (its `id` is the Session id), so the
    * persona is chosen per Session without touching another Session's prompt.
@@ -321,8 +339,11 @@ export class KujiraPersonaController extends TypertRemoteService {
     let text = ''
     try {
       const items = await this.read()
+      // A main session is matched by id; an external channel session (QQ, etc.)
+      // lives in a subdirectory of the persona workspace and is matched by path,
+      // so it still speaks with the persona's prompt.
       const persona = items.find(item => item.sessionId === candidate)
-      // Only persona main sessions get the contract.
+        ?? this.personaForWorkspace(candidate, items)
       if (persona === undefined) return result
       text = (persona.prompt ?? '').trim()
     } catch {

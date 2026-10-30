@@ -26,7 +26,7 @@ import { createAgentPool, createMemberRoster, createMessageCache, createQuoteRes
 export const name = 'dsh-onebot'
 
 /** 需要的能力：创建/驱动 agent（`ctx.agents`）。 */
-export const inject = ['agents']
+export const inject = ['agents', 'workspaceRegistry']
 
 /** 所有配置项和默认值（README 里那一节就是照抄这里）。 */
 export const DEFAULTS = {
@@ -234,7 +234,50 @@ export function apply(ctx, rawConfig) {
     // 名册：过期了就在后台刷（不阻塞这条消息）
     if (message.scope === 'group') roster.ensure(message.groupId)
     stat.dispatched += 1
+    // While this session is still waiting for an answer, hand the message to the
+    // agent immediately instead of queueing it: the dsh side sees it at once and
+    // treats it as an interruption of the running turn.
+    if (queue.busyKeys().includes(message.key)) {
+      await dispatchInterrupt(message)
+      return
+    }
     await queue.run(message.key, () => dispatchOne(message))
+  }
+
+  // ---------------- 等待回复期间的新消息：直接插话 ----------------
+  async function dispatchInterrupt(message) {
+    let rec
+    try {
+      rec = await pool.ensureSession(message.key)
+    } catch (e) {
+      stat.errors += 1
+      log('插话：建会话失败：', e?.message ?? String(e))
+      return
+    }
+    const selfId = selfIdFor(message)
+    const atName = atNameFor(message.groupId)
+    const quote = message.quoteId ? await quotes.resolve(message.key, message.quoteId) : undefined
+    const text = renderEnvelope(message, {
+      atName,
+      selfId,
+      quote,
+      quoteMissing: Boolean(message.quoteId) && !quote,
+      tz: config.tz,
+      imageLinks: config.imageLinks,
+    })
+    try {
+      rec.agent.steer({
+        id: randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'user' },
+      })
+      stat.interrupted = (stat.interrupted ?? 0) + 1
+      log('插话（这条不单独回复）：', message.key, JSON.stringify(text).slice(0, 60))
+    } catch (e) {
+      stat.errors += 1
+      log('插话投递失败：', e?.message ?? String(e))
+    }
   }
 
   // ---------------- 一条消息 → 一轮对话 ----------------
@@ -278,19 +321,29 @@ export function apply(ctx, rawConfig) {
       return
     }
 
+    // Stream each answer segment to QQ the moment it arrives. One forwarded reply
+    // is one delta, so a multi-part answer arrives as several QQ messages.
+    let streamed = 0
+    pool.setChunkSink(message.key, async (text) => {
+      streamed += 1
+      await reply(message, text)
+    })
     try {
       await rec.agent.whenIdle?.()
     } catch (e) {
       stat.errors += 1
       log('等 agent 回答出错：', e?.message ?? String(e))
     }
-    // answer() 会切掉工具调用之前的碎话（那些是干活时的自言自语，不是回复）
+    pool.setChunkSink(message.key, undefined)
+    // answer() 会切掉工具调用之前的碎话；流式没发出去时才整体补一条
     const answer = pool.answer(message.key)
-    if (!answer) {
-      log('这一轮没有可发的正文（只有工具调用）', message.key)
-      return
+    if (streamed === 0) {
+      if (!answer) {
+        log('这一轮没有可发的正文（只有工具调用）', message.key)
+        return
+      }
+      await reply(message, answer)
     }
-    await reply(message, answer)
   }
 
   /** 把一段话发回 QQ。引用触发它的那条（配置可关）。 */
