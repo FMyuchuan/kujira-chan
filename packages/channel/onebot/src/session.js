@@ -410,6 +410,8 @@ export function createAgentPool(options) {
   const { ctx, log = () => {}, provider = '', model = '', cwd = '', preset = '', idStore } = options
   /** @type {Map<string, any>} */
   const sessions = new Map()
+  /** 正在初始化的会话（single-flight：同一个 key 只跑一次） */
+  const creating = new Map()
   let closed = false
 
   /** 收助手流式输出：一个会话的正文攒在它自己的缓冲里 */
@@ -474,7 +476,29 @@ export function createAgentPool(options) {
     }
   }
 
+  /**
+   * 确保会话就绪。
+   *
+   * 同一个 key 同时来两条消息时，只让一条去初始化，另一条等它的结果 —— 否则两条
+   * 各自 create/resume，会互相撞写句柄，最后一条回退新建、一条接上旧会话，凭空多
+   * 出一个会话。
+   * @param {string} key 会话 key
+   */
   async function ensureSession(key) {
+    const found = sessions.get(key)
+    if (found) return found
+    const inflight = creating.get(key)
+    if (inflight !== undefined) return inflight
+    const task = createSession(key)
+    creating.set(key, task)
+    try {
+      return await task
+    } finally {
+      creating.delete(key)
+    }
+  }
+
+  async function createSession(key) {
     const found = sessions.get(key)
     if (found) return found
     if (closed) throw new Error('插件已经卸载了，不再新建会话')
@@ -496,6 +520,7 @@ export function createAgentPool(options) {
     }
     const agentOptions = { ...(provider ? { provider } : {}), ...(model ? { model } : {}) }
     let handle
+    let created = true
     try {
       handle = await ctx.agents.create({
         sessionId,
@@ -508,6 +533,7 @@ export function createAgentPool(options) {
       // after the agent was closed) finds the session already on disk. Pick the
       // existing conversation back up instead of failing the whole dispatch.
       if (!/already exists/.test(String(e?.message ?? ''))) throw e
+      created = false
       log('会话已存在，接着用：', key, sessionId)
       try {
         handle = await ctx.agents.resume({
@@ -551,7 +577,7 @@ export function createAgentPool(options) {
       busy: false,
     }
     sessions.set(key, rec)
-    log('新建会话', key, '→', sessionId)
+    log(created ? '新建会话' : '接回会话', key, '→', sessionId)
     return rec
   }
 
