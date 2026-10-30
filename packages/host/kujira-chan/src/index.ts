@@ -61,7 +61,7 @@ const MAIN_SESSION_CONTRACT = [
   '- 你收到的每一条 user 消息都不是真人直接发来的，而是工作区里其他会话转发过来的，正文前标注「[来自子会话 <短id> 的消息]」。',
   '- 真正的人在别的会话里，看不到你在这里的输出。直接回答没有用，只有调用工具才算回复。',
   `- 回复方式：${REPLY_TOOL}(session_id="<短id>", message="<你的回复>")。`,
-  `- 不想让自己的话引用对方原消息时，给 ${REPLY_TOOL} 带上 quote=false（聊天式的短句适合这样）。`,
+  `- 默认不引用对方原消息；确实需要指代某一句时，给 ${REPLY_TOOL} 带上 quote=true。`,
   '- 收到「[来自子会话 <短id> 的停止请求]」时，立即停止当前处理，不要再调用任何工具。',
   '【约定结束】',
 ].join('\n')
@@ -818,9 +818,10 @@ export class KujiraPersonaController extends TypertRemoteService {
       throw new Error(`unknown session ${JSON.stringify(handle)}; use the id from the forwarded message`)
     }
     const key = String(sessionId)
-    // Channels cannot carry tool metadata, so a "do not quote" reply is tagged
-    // with a leading zero-width space the channel strips before sending.
-    const quoted = quote === false ? `${NO_QUOTE_MARK}${text}` : text
+    // Channels cannot carry tool metadata, so a reply is tagged with a leading
+    // zero-width space that the channel strips before sending. Quoting is opt-in:
+    // only an explicit quote=true keeps the trigger message referenced.
+    const quoted = quote === true ? text : `${NO_QUOTE_MARK}${text}`
     // Remember that this item has been answered, so a later message from the same
     // sibling queues instead of steering into a turn that is already wrapping up.
     for (const queue of this.queues.values()) {
@@ -851,7 +852,7 @@ export class KujiraPersonaController extends TypertRemoteService {
       parameters: {
         session_id: { type: 'string', required: true, description: 'The short session id shown in a forwarded message, such as 6cba11d0.' },
         message: { type: 'string', required: true, description: 'The reply text to place in that session.' },
-        quote: { type: 'boolean', description: 'Quote the triggering message when the channel supports it. Defaults to true; pass false for short follow-up lines.' },
+        quote: { type: 'boolean', description: 'Quote the triggering message when the channel supports it. Defaults to false; pass true only when the reply must point at one specific message.' },
       },
       output: {
         schema: {
@@ -919,7 +920,9 @@ export class KujiraPersonaController extends TypertRemoteService {
  * @returns the first eight uuid characters, or the input when it does not match.
  */
 function shortSessionId(sessionId: string): string {
-  const match = /^session-([0-9a-f]{8})/iu.exec(sessionId)
+  // External channels may hand out a bare UUID instead of the `session-<uuid>`
+  // form, so the handle comes from whichever prefix is present.
+  const match = /^(?:session-)?([0-9a-f]{8})/iu.exec(sessionId)
   return match?.[1] ?? sessionId
 }
 

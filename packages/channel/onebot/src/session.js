@@ -16,7 +16,8 @@
  *      `get_msg` 去捞；同一条 5 分钟内只捞一次，免得有人连点把接口打成风暴。
  */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { normalizeSegments } from './cq.js'
 import { sameMsgId, shortGroupName } from './event.js'
 
@@ -33,18 +34,44 @@ export function sessionKeyOf(message) {
 }
 
 /**
- * 会话 key → 稳定的 session id。
+ * 会话 key ↔ session id 的持久映射。
  *
- * 用确定性 id 而不是 randomUUID：插件重启后同一个私聊/群聊还能接回原来的会话，
- * 否则每次重启都算新会话。加上 `session-` 前缀，dsh 侧才能把它缩成短 id。
- * @param {string} key 会话 key（`group:<群号>` / `private:<QQ号>`）
- * @returns {string} `session-<uuid 形式>` 的稳定 id
+ * 用落盘的映射而不是随机 id：插件重启后同一个私聊/群聊还能接回原来的会话。
+ * 映射文件放在 dsh 的 home 下，不进仓库。
+ * @param {string} file 映射文件路径
  */
-export function sessionIdForKey(key) {
-  const hex = createHash('sha256').update(String(key)).digest('hex')
-  const variant = ((parseInt(hex.slice(16, 18), 16) & 0x3f) | 0x80).toString(16).padStart(2, '0')
-  const version = ((parseInt(hex.slice(12, 14), 16) & 0x0f) | 0x40).toString(16).padStart(2, '0')
-  return `session-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${version}${hex.slice(14, 16)}-${variant}${hex.slice(18, 20)}-${hex.slice(20, 32)}`
+export function createSessionIdStore(file) {
+  /** @type {Record<string, string>} */
+  let map = {}
+  try {
+    map = JSON.parse(readFileSync(file, 'utf8'))
+    if (typeof map !== 'object' || map === null) map = {}
+  } catch {
+    map = {}
+  }
+  function save() {
+    try {
+      writeFileSync(file, `${JSON.stringify(map, null, 2)}\n`, { mode: 0o600 })
+    } catch {
+      // 存不下来只是下次重启接不回旧会话，不影响当前这一轮
+    }
+  }
+  return {
+    /** 读已有的 id（没有就 undefined） */
+    get: (key) => map[key],
+    /** 记下这个 key 用的 id */
+    set(key, sessionId) {
+      if (map[key] === sessionId) return
+      map[key] = sessionId
+      save()
+    },
+    /** 丢掉这个 key（会话已经不能用了） */
+    drop(key) {
+      if (map[key] === undefined) return
+      delete map[key]
+      save()
+    },
+  }
 }
 
 /**
@@ -380,7 +407,7 @@ export function createSerialQueue(options = {}) {
  * @param {string} [options.preset] 可选的 agent 预设名（dsh 装了 agentPresets 才生效）
  */
 export function createAgentPool(options) {
-  const { ctx, log = () => {}, provider = '', model = '', cwd = '', preset = '' } = options
+  const { ctx, log = () => {}, provider = '', model = '', cwd = '', preset = '', idStore } = options
   /** @type {Map<string, any>} */
   const sessions = new Map()
   let closed = false
@@ -431,7 +458,7 @@ export function createAgentPool(options) {
     const found = sessions.get(key)
     if (found) return found
     if (closed) throw new Error('插件已经卸载了，不再新建会话')
-    const sessionId = sessionIdForKey(key)
+    const sessionId = idStore?.get(key) ?? randomUUID()
     let presetId = ''
     let setup
     const presets = typeof ctx.get === 'function' ? ctx.get('agentPresets') : undefined
@@ -447,12 +474,44 @@ export function createAgentPool(options) {
         log('挂载预设失败（用默认身份继续）：', e?.message ?? String(e))
       }
     }
-    const handle = await ctx.agents.create({
-      sessionId,
-      meta: { ...(cwd ? { cwd } : {}), ...(presetId ? { agentPreset: presetId } : {}) },
-      agentOptions: { ...(provider ? { provider } : {}), ...(model ? { model } : {}) },
-      ...(setup ? { setup } : {}),
-    })
+    const agentOptions = { ...(provider ? { provider } : {}), ...(model ? { model } : {}) }
+    let handle
+    try {
+      handle = await ctx.agents.create({
+        sessionId,
+        meta: { ...(cwd ? { cwd } : {}), ...(presetId ? { agentPreset: presetId } : {}) },
+        agentOptions,
+        ...(setup ? { setup } : {}),
+      })
+    } catch (e) {
+      // The id is derived from the channel key, so a restart (or a second message
+      // after the agent was closed) finds the session already on disk. Pick the
+      // existing conversation back up instead of failing the whole dispatch.
+      if (!/already exists/.test(String(e?.message ?? ''))) throw e
+      log('会话已存在，接着用：', key, sessionId)
+      try {
+        handle = await ctx.agents.resume({
+          resumeSessionId: sessionId,
+          agentOptions,
+          ...(setup ? { setup } : {}),
+        })
+      } catch (resumeError) {
+        // 那个会话正被别的写句柄占着（例如刚在 Web 里打开过）：换个新会话接上，
+        // 旧的历史留在原会话里，不因为一次占用就把整个通道卡住。
+        log('接不回旧会话，改开新的：', key, resumeError?.message ?? String(resumeError))
+        idStore?.drop(key)
+        const fresh = randomUUID()
+        handle = await ctx.agents.create({
+          sessionId: fresh,
+          meta: { ...(cwd ? { cwd } : {}), ...(presetId ? { agentPreset: presetId } : {}) },
+          agentOptions,
+          ...(setup ? { setup } : {}),
+        })
+        idStore?.set(key, fresh)
+        sessions.set(key, { sessionId: fresh, agent: handle.agent, handle, buf: '', answerFrom: 0, toolCalling: false, step: 0, toolId: '', busy: false })
+        return sessions.get(key)
+      }
+    }
     // Put the session under the Workspace that owns this working directory, so it
     // shows up next to the persona's other sessions instead of "ungrouped".
     // Runtime-created sessions are not adopted by the startup bootstrap, so the
@@ -470,6 +529,7 @@ export function createAgentPool(options) {
       log('会话归组失败（不影响收发）：', e?.message ?? String(e))
     }
 
+    idStore?.set(key, sessionId)
     const rec = {
       key,
       sessionId,

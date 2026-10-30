@@ -20,7 +20,7 @@
 import { randomUUID } from 'node:crypto'
 import { parseOneBotEvent, renderEnvelope, sanitizeOutgoing, shouldDispatch } from './src/event.js'
 import { buildOutgoingMessage, createApi, createBackoff, createHttpTransport, createWsTransport } from './src/api.js'
-import { createAgentPool, createMemberRoster, createMessageCache, createQuoteResolver, createSerialQueue } from './src/session.js'
+import { createAgentPool, createMemberRoster, createMessageCache, createQuoteResolver, createSerialQueue, createSessionIdStore } from './src/session.js'
 
 /** Cordis 插件名。 */
 export const name = 'dsh-onebot'
@@ -162,6 +162,12 @@ export function apply(ctx, rawConfig) {
   }
 
   // ---------------- 会话层 ----------------
+  /** 会话映射文件：放 dsh home 下，跨重启保留 */
+  function sessionMapPath() {
+    const home = process.env.DSH_HOME ?? `${process.env.HOME ?? '/root'}/.dsh`
+    return `${home}/onebot-sessions.json`
+  }
+
   const cache = createMessageCache({ max: 60 })
   const quotes = createQuoteResolver({ api, cache, log, now, selfIds })
   const roster = createMemberRoster({ api, log, now })
@@ -172,6 +178,8 @@ export function apply(ctx, rawConfig) {
     model: config.model,
     cwd: config.cwd,
     preset: config.preset,
+    // key -> session id，落盘在 dsh home 下，重启后能接回同一批会话
+    idStore: createSessionIdStore(sessionMapPath()),
   })
   const queue = createSerialQueue({ log, timeoutMs: config.queue.timeoutMs, maxQueue: config.queue.max })
 

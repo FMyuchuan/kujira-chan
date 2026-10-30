@@ -20,7 +20,11 @@ function isBuildFaceClient(value: unknown): boolean {
  */
 export default defineConfig(({ env }) => {
   const client = isBuildFaceClient(env?.DSH_BUILD_FACE)
+  // `packages/channel/onebot` is plain hand-written JavaScript with no TypeScript
+  // build step, so it has no `lib/types` entry to bundle. Excluding it keeps the
+  // workspace-wide build from demanding one.
   const packages = workspacePackageGlobs(globSync(['vendor/*/package.json', 'packages/*/*/package.json'], { cwd: import.meta.dirname }))
+    .filter(dir => dir !== 'packages/channel/onebot')
   return {
     workspace: [...packages, 'apps/cli', ...client ? [] : ['apps/desktop-host']],
     entry: client ? '' : ['lib/types/{index,startup}.js'],
