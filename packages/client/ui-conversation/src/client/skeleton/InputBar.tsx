@@ -158,6 +158,9 @@ export const InputBar = memo(function InputBar({
   // the composer asking for the only thing it prevents. The other reasons to
   // be disabled do lock it — there is no session to choose a model for.
   const modelSeatLocked = removed || inert || !live
+  // Same scope as the model seat: a plugin-raised composer block only stops free
+  // text, so the permission control stays usable.
+  const permissionLocked = removed || inert || !live
   const machineBusy = input?.phase === 'adjudicating' || input?.phase === 'submitting' || input?.phase === 'sending'
   // The message waits for the Host to accept it; Send shows progress instead of the arrow.
   const sending = input?.phase === 'sending'
@@ -506,7 +509,7 @@ export const InputBar = memo(function InputBar({
               onChange={onPickFiles}
             />
             <div className={css.modes}>
-              {sessionId === undefined ? null : renderSlot('conversation.input.permission', { locked })}
+              {sessionId === undefined ? null : renderSlot('conversation.input.permission', { locked: permissionLocked })}
               {sessionId === undefined ? null : renderSlot('conversation.input.plan', { locked })}
             </div>
             {input === undefined || sessionId === undefined
