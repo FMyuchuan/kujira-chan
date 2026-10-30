@@ -87,19 +87,7 @@ pnpm run build:web
 
 ### 运行
 
-源码部署 + systemd：
-
-```ini
-[Service]
-WorkingDirectory=/opt/kujira-chan
-ExecStart=/usr/local/bin/node --import tsx/esm apps/cli/src/bin.ts web \
-  --no-open --host 172.27.14.181 --port 8443 \
-  --public-url https://<public-ip>:8443/ \
-  --trusted-host <public-ip>:8443 \
-  --tls-cert /root/.dsh-web-tls/cert.pem \
-  --tls-key /root/.dsh-web-tls/key.pem
-Environment=DSH_WEB_PASSWORD=<password>
-```
+源码部署，交给进程管理器（systemd 等）常驻即可。
 
 ---
 
