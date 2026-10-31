@@ -826,17 +826,36 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param handle - the value the model passed to the tool.
    * @returns the full Session id, or undefined when nothing matches.
    */
-  private resolveSession(handle: string): SessionId | undefined {
+  private async resolveSession(handle: string): Promise<SessionId | undefined> {
     const trimmed = handle.trim()
+    if (trimmed === '') return undefined
     const mapped = this.shortIds.get(trimmed)
     if (mapped !== undefined) return mapped as SessionId
     if (this.ctx.sessions.get(trimmed as SessionId) !== undefined) return trimmed as SessionId
     let match: string | undefined
+    const consider = (id: string): boolean => {
+      if (id !== trimmed && !id.startsWith(trimmed)) return true
+      if (match !== undefined && match !== id) return false
+      match = id
+      return true
+    }
     for (const [short, full] of this.shortIds) {
-      if (short === trimmed || full === trimmed || full.startsWith(trimmed)) {
-        if (match !== undefined && match !== full) return undefined
-        match = full
+      if (short === trimmed || !consider(full)) return undefined
+    }
+    for (const session of this.ctx.sessions.list()) {
+      if (!consider(String(session.id))) return undefined
+    }
+    if (match !== undefined) return match as SessionId
+    // Sessions that are only on disk still answer their short handle: the map above
+    // is rebuilt per process, so a wakeup scheduled before a restart would
+    // otherwise fail here even though the conversation exists.
+    try {
+      const value = await this.ctx.sessionController.list({}, AbortSignal.timeout(5_000))
+      for (const item of value.items) {
+        if (!consider(String(item.sessionId))) return undefined
       }
+    } catch {
+      // Listing failed: fall through with whatever the live set produced.
     }
     return match as SessionId | undefined
   }
@@ -847,7 +866,7 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param text - the reply text.
    */
   private async deliverReply(handle: string, text: string, quote?: string): Promise<void> {
-    const sessionId = this.resolveSession(handle)
+    const sessionId = await this.resolveSession(handle)
     if (sessionId === undefined) {
       throw new Error(`unknown session ${JSON.stringify(handle)}; use the id from the forwarded message`)
     }
