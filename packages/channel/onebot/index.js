@@ -355,23 +355,44 @@ export function apply(ctx, rawConfig) {
   }
 
   /** 把一段话发回 QQ。引用触发它的那条（配置可关）。 */
+  /**
+   * 解析 persona 侧塞在正文前的标记。
+   * @param {string} key 会话 key
+   * @param {string} raw 带标记的正文
+   * @returns {{clean: string, replyTo: string|undefined}} 干净正文与要引用的消息 id
+   */
+  function parseMarked(key, raw) {
+    const MARK = '\u200b'
+    if (!raw.startsWith(MARK)) return { clean: sanitizeOutgoing(raw), replyTo: undefined }
+    const rest = raw.slice(1)
+    const end = rest.indexOf(MARK)
+    if (end <= 0) return { clean: sanitizeOutgoing(rest), replyTo: undefined }
+    const prefix = rest.slice(0, end).trim()
+    const clean = sanitizeOutgoing(rest.slice(end + 1))
+    const hit = prefix === '' ? undefined : cache.findByPrefix(key, prefix)
+    if (hit === undefined) throw new Error(`引用前缀没有匹配到消息：${prefix}`)
+    return { clean, replyTo: hit.id }
+  }
+
   async function reply(message, text) {
-    // A leading zero-width space means the answering side asked not to quote.
+    // Marked shapes come from the persona side; an unmarked body keeps the
+    // historical behaviour of quoting the message that triggered the turn.
     const raw = String(text ?? '')
-    const noQuote = raw.startsWith('\u200b')
-    const clean = sanitizeOutgoing(noQuote ? raw.slice(1) : raw)
-    if (!clean) return
-    const replyTo = config.quoteReply && !noQuote ? message.messageId : undefined
     try {
-      await api.send(message.key, clean, { replyTo })
+      const parsed = parseMarked(message.key, raw)
+      if (!parsed.clean) return
+      const legacy = !raw.startsWith('\u200b') && config.quoteReply ? message.messageId : undefined
+      const replyTo = parsed.replyTo ?? legacy
+      await api.send(message.key, parsed.clean, { replyTo: config.quoteReply ? replyTo : undefined })
       stat.replied += 1
-      log('已回复', message.key, `${clean.length} 字`)
+      log('已回复', message.key, `${parsed.clean.length} 字`)
     } catch (e) {
       stat.errors += 1
       const detail = e?.retcode !== undefined ? `retcode=${e.retcode}` : e?.message ?? String(e)
       log('回复失败：', message.key, detail)
     }
   }
+
 
   // ---------------- 连接生命周期 ----------------
   ctx.effect(() => {
@@ -402,6 +423,15 @@ export function apply(ctx, rawConfig) {
         sendGroupMsg: (groupId, message, opts) => api.sendGroupMsg(groupId, message, opts),
         sendPrivateMsg: (userId, message, opts) => api.sendPrivateMsg(userId, message, opts),
         sessionKeys: () => [...pool.sessions.keys()],
+        /** 反查：某个 dsh 会话 id 对应哪个 QQ 会话 key */
+        keyOfSession: (sessionId) => idStore?.keyOf(sessionId),
+        /** 主动发一条消息（不依赖是否有人在等）；正文可带引用标记 */
+        async sendMarked(key, raw) {
+          const parsed = parseMarked(key, String(raw ?? ''))
+          if (!parsed.clean) return
+          await api.send(key, parsed.clean, { replyTo: config.quoteReply ? parsed.replyTo : undefined })
+          stat.replied += 1
+        },
         login: () => login,
         stats: () => ({ ...stat, sessions: pool.sessions.size, ...(wsTransport?.state?.() ?? {}) }),
         /** 把一段文本/消息段预备好（供外部检查会构造出什么） */

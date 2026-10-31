@@ -1,7 +1,7 @@
 /**
  * Persona main-session orchestration: sibling sessions in one persona workspace
  * forward their user messages to the persona's main session, which answers and
- * delivers the reply back through the `kujira_reply` tool.
+ * delivers the message back through the `kujira_send` tool.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -54,7 +54,7 @@ const FORWARD_QUEUE_LIMIT = 50
 const NO_QUOTE_MARK = '\u200b'
 
 /** Tool the main session calls to answer a sibling session. */
-const REPLY_TOOL = 'kujira_reply'
+const SEND_TOOL = 'kujira_send'
 
 /** Standing rules every persona main session receives in its system prompt. */
 const MAIN_SESSION_CONTRACT = [
@@ -62,8 +62,8 @@ const MAIN_SESSION_CONTRACT = [
   '你是本工作区的主会话，是这里唯一负责思考和作答的 agent。',
   '- 你收到的每一条 user 消息都不是真人直接发来的，而是工作区里其他会话转发过来的，正文前标注「[来自子会话 <短id> 的消息]」。',
   '- 真正的人在别的会话里，看不到你在这里的输出。直接回答没有用，只有调用工具才算回复。',
-  `- 回复方式：${REPLY_TOOL}(session_id="<短id>", message="<你的回复>")。`,
-  `- 默认不引用对方原消息；确实需要指代某一句时，给 ${REPLY_TOOL} 带上 quote=true。`,
+  `- 回复方式：${SEND_TOOL}(session_id="<短id>", message="<你的回复>")。`,
+  `- 默认不引用对方原消息；需要引用某一条时，给 ${SEND_TOOL} 带上 quote 参数（写那条消息正文的开头一段），匹配不到会报错。`,
   '- 收到「[来自子会话 <短id> 的停止请求]」时，立即停止当前处理，不要再调用任何工具。',
   '- 你可以用 kujira_persona_prompt 查看或改写自己的人格提示词：不传 prompt 是查看，传 prompt 是改写。',
   '- 需要过一会儿自己再行动时，用 kujira_wake 安排一次唤醒：给 in（如 10m、2h）或 at（ISO 时间），可带 reason 说明到点要做什么。',
@@ -537,7 +537,7 @@ export class KujiraPersonaController extends TypertRemoteService {
     const main = persona.sessionId
     if (main === undefined) return
     const handle = shortSessionId(childSessionId)
-    const body = `[来自子会话 ${handle} · 回复用 ${REPLY_TOOL}；不需要时可以不回复]\n${text}`
+    const body = `[来自子会话 ${handle} · 回复用 ${SEND_TOOL}；不需要时可以不回复]\n${text}`
     this.awaitingSteer.set(childSessionId, { personaId: persona.id, text: body })
     void this.ctx.sessionController.prompt({
       requestId: randomUUID() as never,
@@ -586,7 +586,7 @@ export class KujiraPersonaController extends TypertRemoteService {
     const handle = shortSessionId(childSessionId)
     const body = `[来自子会话 ${handle} 的停止请求]\n`
       + '该会话的用户已经停止等待。如果还在为它处理，请立即停止，不要再调用 '
-      + `${REPLY_TOOL}，也不要继续这条回复。`
+      + `${SEND_TOOL}，也不要继续这条回复。`
     void this.ctx.sessionController.prompt({
       requestId: randomUUID() as never,
       sessionId: main as SessionId,
@@ -706,7 +706,7 @@ export class KujiraPersonaController extends TypertRemoteService {
     const main = persona.sessionId
     if (main === undefined) return
     const handle = shortSessionId(item.childSessionId)
-    const forwarded = `[来自子会话 ${handle} · 回复用 ${REPLY_TOOL}；不需要时可以不回复]\n${item.text}`
+    const forwarded = `[来自子会话 ${handle} · 回复用 ${SEND_TOOL}；不需要时可以不回复]\n${item.text}`
     void this.ctx.sessionController.prompt({
       requestId: randomUUID() as never,
       sessionId: main as SessionId,
@@ -846,17 +846,19 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param handle - the short session id the model used.
    * @param text - the reply text.
    */
-  private async deliverReply(handle: string, text: string, quote?: boolean): Promise<void> {
+  private async deliverReply(handle: string, text: string, quote?: string): Promise<void> {
     const sessionId = this.resolveSession(handle)
     const target = sessionId === undefined ? undefined : this.ctx.sessions.get(sessionId)
     if (target === undefined) {
       throw new Error(`unknown session ${JSON.stringify(handle)}; use the id from the forwarded message`)
     }
     const key = String(sessionId)
-    // Channels cannot carry tool metadata, so a reply is tagged with a leading
-    // zero-width space that the channel strips before sending. Quoting is opt-in:
-    // only an explicit quote=true keeps the trigger message referenced.
-    const quoted = quote === true ? text : `${NO_QUOTE_MARK}${text}`
+    // Channels carry no tool metadata, so the delivery target rides in a leading
+    // zero-width marker: MARK<prefix>MARK<body> quotes the recent message starting
+    // with <prefix>, while MARK<body> sends without quoting.
+    const quoted = quote === undefined || quote.trim() === ''
+      ? `${NO_QUOTE_MARK}${text}`
+      : `${NO_QUOTE_MARK}${quote.trim()}${NO_QUOTE_MARK}${text}`
     // Remember that this item has been answered, so a later message from the same
     // sibling queues instead of steering into a turn that is already wrapping up.
     for (const queue of this.queues.values()) {
@@ -868,10 +870,36 @@ export class KujiraPersonaController extends TypertRemoteService {
     // Push straight into the parked turn so the answer streams in as it is
     // produced. Repeated calls append to the same sink, keeping one message.
     if (this.pushToParked(key, quoted)) return
-    // No parked turn (an interruption already consumed it): buffer for a merged
-    // append once the main session's turn ends.
-    const previous = this.pendingReplies.get(key)
-    this.pendingReplies.set(key, previous === undefined ? quoted : `${previous}\n\n${quoted}`)
+    // No parked turn: this is a proactive message. Record it in the sibling's
+    // history first (clean text), then push it out through the channel when the
+    // sibling belongs to one. Append does not reach the channel, because the
+    // channel only listens to live assistant streams.
+    this.appendAssistant(target, text)
+    const channel = this.channelService()
+    const channelKey = typeof channel?.keyOfSession === 'function' ? channel.keyOfSession(key) : undefined
+    if (channelKey === undefined || typeof channel?.sendMarked !== 'function') return
+    try {
+      await channel.sendMarked(channelKey, quoted)
+    } catch (error: unknown) {
+      throw new Error(`channel send failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * The optional channel service (onebot), when that plugin is installed.
+   * @returns the service surface, or undefined.
+   */
+  private channelService(): {
+    keyOfSession?: (sessionId: string) => string | undefined
+    sendMarked?: (key: string, text: string) => Promise<void>
+  } | undefined {
+    try {
+      return (this.ctx as unknown as { get?: (name: string) => unknown }).get?.('onebot') as
+        | { keyOfSession?: (sessionId: string) => string | undefined, sendMarked?: (key: string, text: string) => Promise<void> }
+        | undefined
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -1097,13 +1125,14 @@ export class KujiraPersonaController extends TypertRemoteService {
   private replyTool() {
     const controller = this
     return defineTool({
-      name: REPLY_TOOL,
-      description: 'Post a reply from this persona main session into a sibling session of the same workspace. '
-        + 'Use the session_id a forwarded message named.',
+      name: SEND_TOOL,
+      description: 'Send a message from this persona main session into a sibling session of the same workspace. '
+        + 'Use the short session id a forwarded message named. When that session has no pending turn, the message '
+        + 'is also pushed to its channel (QQ) as a proactive message.',
       parameters: {
         session_id: { type: 'string', required: true, description: 'The short session id shown in a forwarded message, such as 6cba11d0.' },
-        message: { type: 'string', required: true, description: 'The reply text to place in that session.' },
-        quote: { type: 'boolean', description: 'Quote the triggering message when the channel supports it. Defaults to false; pass true only when the reply must point at one specific message.' },
+        message: { type: 'string', required: true, description: 'The message text to place in that session.' },
+        quote: { type: 'string', description: 'Content prefix of a recent message to quote. Pass it only when the message must point at one specific earlier message; the send fails when nothing matches.' },
       },
       output: {
         schema: {
@@ -1113,7 +1142,7 @@ export class KujiraPersonaController extends TypertRemoteService {
         },
         render: (args: { session_id: string }) => [{ type: 'text', text: `reply delivered to ${args.session_id}` }],
       },
-      async execute(args: { session_id: string, message: string, quote?: boolean }) {
+      async execute(args: { session_id: string, message: string, quote?: string }) {
         await controller.deliverReply(args.session_id, args.message, args.quote)
         return { delivered: true }
       },

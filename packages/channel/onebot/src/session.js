@@ -18,7 +18,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { normalizeSegments } from './cq.js'
+import { humanizeCq, normalizeSegments } from './cq.js'
 import { sameMsgId, shortGroupName } from './event.js'
 
 /**
@@ -64,6 +64,11 @@ export function createSessionIdStore(file) {
       if (map[key] === sessionId) return
       map[key] = sessionId
       save()
+    },
+    /** 反查：哪个会话 key 用了这个 session id */
+    keyOf(sessionId) {
+      for (const [key, id] of Object.entries(map)) if (id === sessionId) return key
+      return undefined
     },
     /** 丢掉这个 key（会话已经不能用了） */
     drop(key) {
@@ -131,6 +136,24 @@ export function createMessageCache(options = {}) {
       }
       return undefined
     },
+    /**
+     * 按正文前缀找最近一条消息（新→旧）。引用目标用内容前缀指定时走这里。
+     * @param {string} key 会话 key
+     * @param {string} prefix 正文前缀
+     * @returns {{id: string, who: string, segments: Array<object>, at: number}|undefined}
+     */
+    findByPrefix(key, prefix) {
+      const list = byChat.get(key)
+      const needle = String(prefix ?? '').trim()
+      if (!list || !needle) return undefined
+      for (let i = list.length - 1; i >= 0; i--) {
+        const entry = list[i]
+        const text = humanizeCq(entry.segments ?? [], {}).trim()
+        if (text.startsWith(needle)) return entry
+      }
+      return undefined
+    },
+
     /** 最近几条（新→旧） */
     recent(key, n = 10) {
       return [...(byChat.get(key) ?? [])].reverse().slice(0, n)
