@@ -171,6 +171,9 @@ export function apply(ctx, rawConfig) {
   const cache = createMessageCache({ max: 60 })
   const quotes = createQuoteResolver({ api, cache, log, now, selfIds })
   const roster = createMemberRoster({ api, log, now })
+  // key -> session id，落盘在 dsh home 下，重启后能接回同一批会话。
+  // 提到变量上：服务里的 keyOfSession 也要用它反查。
+  const idStore = createSessionIdStore(sessionMapPath())
   const pool = createAgentPool({
     ctx,
     log,
@@ -178,8 +181,7 @@ export function apply(ctx, rawConfig) {
     model: config.model,
     cwd: config.cwd,
     preset: config.preset,
-    // key -> session id，落盘在 dsh home 下，重启后能接回同一批会话
-    idStore: createSessionIdStore(sessionMapPath()),
+    idStore,
   })
   const queue = createSerialQueue({ log, timeoutMs: config.queue.timeoutMs, maxQueue: config.queue.max })
 
