@@ -31,9 +31,9 @@
 
 | 工具 / 页面 | 作用 |
 |---|---|
-| `kujira_reply(session_id, message, quote?)` | 主会话把回复投递给指定会话 |
+| `kujira_send(session_id, message, quote?)` | 投递消息；对方空闲时变成主动消息，`quote` 传内容前缀可引用某条历史消息 |
 | `kujira_persona_prompt(prompt?)` | 主会话查看或改写自己的人格提示词 |
-| `kujira_wake({ in, at, reason, cancel })` | 定时唤醒自己，可持久化、可取消 |
+| `kujira_wake({ in, at, reason, cancel })` | 定时唤醒自己，跨重启保留、可取消 |
 | 插件设置页 | 人格列表、提示词编辑、待触发唤醒 |
 
 主会话的输入框被禁用（它不接受直接输入），但模型选择、权限设置、停止按钮保留。
@@ -95,7 +95,7 @@ pnpm run build:web
 
 | 路径 | 作用 |
 |---|---|
-| `packages/host/kujira-chan` | 人格列表、转发队列、`kujira_reply` / `kujira_persona_prompt` / `kujira_wake` |
+| `packages/host/kujira-chan` | 人格列表、转发队列、`kujira_send` / `kujira_persona_prompt` / `kujira_wake` |
 | `packages/client/ui-settings-kujira-chan` | 人格设置页、主会话输入框禁用 |
 | `packages/channel/onebot` | OneBot 11 通道 |
 | `packages/memory/workspace-memory` | 工作区长期记忆 |

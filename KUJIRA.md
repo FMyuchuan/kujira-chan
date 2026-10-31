@@ -308,10 +308,13 @@ ln -sfn ../../../../host/kujira-chan packages/bundle/web-app/node_modules/@deeps
 ```text
 子会话发消息
   → Host 入队（按人格串行）
-  → 主会话收到「[来自子会话 xxxxxxxx · 回复用 kujira_reply；不需要时可以不回复] …」
-  → 主会话调用 kujira_reply(session_id, message)
-  → 回复流式写回子会话那一轮
+  → 主会话收到「[来自子会话 xxxxxxxx · 回复用 kujira_send；不需要时可以不回复] …」
+  → 主会话调用 kujira_send(session_id, message, quote?)
+  → 有挂起轮：流式写回那一轮；没有挂起轮：写进历史并直接发通道（主动消息）
 ```
+
+工具只有一个 `kujira_send`：「回复某人」和「主动开口」在模型侧是同一个动作，
+由会话当前有没有等待中的轮次决定走哪条路。
 
 **常驻系统提示**
 
@@ -323,8 +326,11 @@ ln -sfn ../../../../host/kujira-chan packages/bundle/web-app/node_modules/@deeps
 你是本工作区的主会话，是这里唯一负责思考和作答的 agent。
 - 你收到的每一条 user 消息都不是真人直接发来的，而是工作区里其他会话转发过来的，正文前标注「[来自子会话 <短id> 的消息]」。
 - 真正的人在别的会话里，看不到你在这里的输出。直接回答没有用，只有调用工具才算回复。
-- 回复方式：kujira_reply(session_id="<短id>", message="<你的回复>")。
+- 回复方式：kujira_send(session_id="<短id>", message="<你的回复>")。
+- 默认不引用对方原消息；需要引用某一条时，给 kujira_send 带上 quote 参数（写那条消息正文的开头一段），匹配不到会报错。
 - 收到「[来自子会话 <短id> 的停止请求]」时，立即停止当前处理，不要再调用任何工具。
+- 你可以用 kujira_persona_prompt 查看或改写自己的人格提示词：不传 prompt 是查看，传 prompt 是改写。
+- 需要过一会儿自己再行动时，用 kujira_wake 安排一次唤醒：给 in（如 10m、2h）或 at（ISO 时间），可带 reason 说明到点要做什么。
 【约定结束】
 ```
 
@@ -334,7 +340,7 @@ ln -sfn ../../../../host/kujira-chan packages/bundle/web-app/node_modules/@deeps
 转发正文只有前缀一行：
 
 ```text
-[来自子会话 758b072e · 回复用 kujira_reply；不需要时可以不回复]
+[来自子会话 758b072e · 回复用 kujira_send；不需要时可以不回复]
 <消息正文>
 ```
 
@@ -359,7 +365,7 @@ sharedSlot[Symbol.for('dsh.kujira.isForwardOnly')] = (sessionId) => { /* cwd + p
 **挂起与流式回复**
 
 挂起的轮在共享 Map `dsh.kujira.forwardWaiters` 上登记一个 sink，每 120 ms 把新增文本
-作为 `text-delta` 吐出。因此 `kujira_reply` **调用一次就投递一次**，但子会话里始终是
+作为 `text-delta` 吐出。因此 `kujira_send` **调用一次就投递一次**，但子会话里始终是
 同一条消息在增长，最终仍是一段完整回复。
 
 主会话 `turn/end` 时 Host 把 sink 标记为结束；若那一轮已被插话消耗掉，则改为追加
@@ -369,15 +375,23 @@ sharedSlot[Symbol.for('dsh.kujira.isForwardOnly')] = (sessionId) => { /* cwd + p
 
 | 场景 | 行为 |
 |---|---|
-| 主会话仍在处理，子会话又发消息 | `prompt(mode: 'steer')` 插进当前轮，同时把该消息从子会话 inbox 摘掉，并把前面那个挂起轮结束掉，让回复落在两条消息之后 |
-| 主会话已调用过 `kujira_reply`（收尾中） | 进队列，等这一轮结束再处理 |
+| 主会话有正在运行的轮次，子会话又发消息 | `prompt(mode: 'steer')` 插进当前轮；子会话当前那一步**保持挂起**，消息留在它的 inbox 里，回复仍落在它自己的 step 上 |
+| 主会话已经把这条插话写进自己的历史 | Host 认出来，这时才结束子会话的当前 step，让下一步去消费那条消息 |
+| 主会话已经没有在跑的轮次 | 进队列，排队等下一次 |
 | 在子会话点停止 | 给主会话 steer 一条「用户已停止」，**让模型自己收手**，不使用 `cancel` |
+
+插话的判定依据是「主会话此刻有没有在跑的 turn」，不是「是否已经回复过」——
+后者会让同轮里的第二次插话失效。
 
 **主会话的输入**
 
-主会话的 composer 被 Client 插件接管（`conversation.composer` chain slot），
-只显示一行说明加一个「停止」按钮。停止按钮调用 `remote.session.cancel`，
-用作主从链路异常时的应急出口。
+主会话的 composer 不再被替换，而是给会话 raise 一个 **composer block**
+（`ctx.conversation.blocks.set(sessionId, { reason })`）：
+
+- 文本输入被拒绝，占位提示是「这是人格主会话。请在该工作区的其他会话里发起对话。」
+- 模型选择、权限设置、停止按钮**全部保留**，链路异常时可以从停止按钮收手
+
+早先是整块接管 composer 的，后来发现那样连模型选择和停止按钮一起被藏掉了。
 
 **会话 ID 的短写法**
 
@@ -388,13 +402,93 @@ sharedSlot[Symbol.for('dsh.kujira.isForwardOnly')] = (sessionId) => { /* cwd + p
 
 | 包 | 角色 |
 |---|---|
-| `packages/host/kujira-chan` | 队列、转发、探针注册、回复投递、`kujira_reply` 工具 |
+| `packages/host/kujira-chan` | 队列、转发、探针注册、投递、`kujira_send` / `kujira_persona_prompt` / `kujira_wake` |
 | `packages/llm/llm-deepseek/src/adapter.ts` | 静默判断、挂起循环、把回复作为本轮流式输出 |
-| `packages/client/ui-settings-kujira-chan` | 人格页、主会话 composer 接管、停止按钮 |
+| `packages/client/ui-settings-kujira-chan` | 人格页、主会话 composer block、停止按钮 |
+| `packages/channel/onebot` | QQ 通道；服务面暴露 `send` / `sendMarked` / `keyOfSession` |
+| `packages/memory/workspace-memory` | 工作区记忆；跳过人格子会话 |
 
 三者通过 `globalThis` 上的两个 symbol 通信：
 `Symbol.for('dsh.kujira.isForwardOnly')`（探针）与
 `Symbol.for('dsh.kujira.forwardWaiters')`（sink 表）。
+
+## 三个工具
+
+主会话能用的工具都在 `packages/host/kujira-chan`，只有人格主会话可以调用。
+
+| 工具 | 作用 |
+|---|---|
+| `kujira_send(session_id, message, quote?)` | 把一个消息投递给工作区里的子会话 |
+| `kujira_persona_prompt(prompt?)` | 读或改写自己的人格提示词 |
+| `kujira_wake(in?, at?, reason?, cancel?)` | 安排一次自我唤醒 |
+
+### 投递语义
+
+`kujira_send` 只有一条对外路径，但内部按目标会话的状态分两种：
+
+```text
+目标会话有挂起轮（对方正等着）
+  → 流式写进那个 sink，QQ 侧看到的是这一轮的回复
+目标会话没有挂起轮（主动开口）
+  → 写进历史（自成一轮完整的 turn）
+  → 经通道服务直接发出去
+```
+
+主动那条必须写成一整轮（`turn/start → step/start → assistant/message → step/end → turn/end`）。
+直接往一个已关闭的 turn 上挂 `assistant/message` 会让日志校验失败
+（`assistant/message does not match an open turn and step`），会话从此打不开。
+
+### 引用
+
+`quote` 传的是**内容前缀**，不是消息 id：
+
+```text
+kujira_send(session_id="46e209f4", message="好的", quote="该吃饭啦")
+```
+
+通道在自己的缓存里找最近一条正文以该前缀开头的消息，用它的 `message_id` 做引用。
+**匹配不到就报错**，不会静默降级——这样模型能立刻知道引用没成立。
+
+前缀通过正文前的标记传递（`\u200b<前缀>\u200b<正文>`）：标记会写进子会话的
+assistant 历史，但子会话不跑模型、主会话也只读转发过来的 user 内容，没有模型会读到它。
+
+### 唤醒
+
+```text
+kujira_wake({ in: "10m", reason: "..." })
+kujira_wake({ at: "2026-10-31T22:00:00+08:00", reason: "..." })
+kujira_wake({ cancel: "<id>" })
+```
+
+- 到点后主会话收到一条 `[定时唤醒] <reason>`，由它自己决定做什么
+- 记录写在 `~/.dsh/kujira-wakeups.json`，进程重启后重新装载；停机期间到点的会在启动时立刻补发
+- 唤醒任务**绑死会话 id**：重启后那个会话可能不在内存里，投递时会先 `sessionController.resolveAgent` 把它从磁盘恢复，再写历史、再发通道
+- 短 id 的解析不只查内存映射，还会回退到内存会话列表和持久化列表做前缀匹配
+
+### 记忆插件与子会话
+
+`workspace-memory` 的两个钩子都会跳过人格子会话：
+
+| 钩子 | 行为 |
+|---|---|
+| `agent/pre-step`（注入记忆） | 子会话直接 `return next()`，不注入 |
+| `agent/turn-stopping`（落盘） | 子会话跳过，不写 |
+
+判断复用 kujira 的探针 `dsh.kujira.isForwardOnly`（cwd 属于某人格工作区且会话不是该人格主会话），
+两边不会各写一份再慢慢跑偏。否则同一句对话会被主会话和子会话各记一遍，记忆文件迅速膨胀。
+
+### 通道侧需要的能力
+
+`onebot` 通过 `ctx.provide('onebot', ...)` 暴露：
+
+| 方法 | 用途 |
+|---|---|
+| `send(key, message, opts)` | 按会话 key 发送 |
+| `sendMarked(key, marked)` | 发送带引用标记的正文（主动消息用） |
+| `keyOfSession(sessionId)` | 会话 id → QQ 会话 key 反查 |
+| `sessionKeys()` / `stats()` / `build()` | 诊断与预构造 |
+
+会话 key → session id 的映射落在 `~/.dsh/onebot-sessions.json`，重启后据此接回同一批会话。
 
 ## 登录页
 
