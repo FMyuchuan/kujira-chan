@@ -830,7 +830,11 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param target - the sibling session receiving the message.
    * @param text - message body to record.
    */
-  private appendProactiveTurn(target: Session, text: string): void {
+  private appendProactiveTurn(target: Session, text: string): boolean {
+    // Writing into a session that is mid-turn would interleave with the agent's
+    // own appends and can leave the log unreadable. Skip the record in that case;
+    // the message still goes out through the channel.
+    if (this.hasOpenTurn(target)) return false
     const position = this.latestPosition(target)
     const turn = (position.turn ?? 0) + 1
     const step = 1
@@ -848,6 +852,24 @@ export class KujiraPersonaController extends TypertRemoteService {
     }, { surfaceOp: 'append' } as never)
     target.append('step/end', { turn, step } as never)
     target.append('turn/end', { turn, reason: { kind: 'completed' } } as never)
+    // Someone may have claimed the same number between our read and our write.
+    // The log stays readable either way, but reporting the miss lets the caller
+    // avoid claiming a record it did not cleanly own.
+    return this.latestPosition(target).turn === turn
+  }
+
+  /**
+   * Whether the session currently has a turn that has not ended.
+   * @param session - the session to inspect.
+   * @returns true while a turn is open.
+   */
+  private hasOpenTurn(session: Session): boolean {
+    let open = false
+    for (const event of session.ownEvents()) {
+      if (event.type === 'turn/start') open = true
+      else if (event.type === 'turn/end') open = false
+    }
+    return open
   }
 
   /**
@@ -928,6 +950,8 @@ export class KujiraPersonaController extends TypertRemoteService {
     // history first (clean text), then push it out through the channel when the
     // sibling belongs to one. Append does not reach the channel, because the
     // channel only listens to live assistant streams.
+    // A busy session or a lost number race only costs the record; the message
+    // still leaves through the channel below.
     this.appendProactiveTurn(target, text)
     const channel = this.channelService()
     const channelKey = typeof channel?.keyOfSession === 'function' ? channel.keyOfSession(key) : undefined

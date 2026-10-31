@@ -331,7 +331,7 @@ export class ReactLoopAgent implements Agent {
     const phase = this.phase
     const { signal } = phase.abort
     signal.throwIfAborted()
-    const turn = phase.turn + 1
+    const turn = this.nextTurnNumber(phase)
     try {
       this.session.append('turn/start', { turn })
     } catch (error: unknown) {
@@ -653,6 +653,30 @@ export class ReactLoopAgent implements Agent {
   }
 
   /** Log the resolved envelope and derive a frozen request from the admitted surface. */
+  /**
+   * Next turn number for this run.
+   *
+   * The counter lives in memory, but the log is the source of truth: another
+   * writer (a persona main session delivering a proactive message) can append a
+   * turn while this agent is idle. Taking the larger of the two keeps numbering
+   * monotonic instead of producing two turns with the same number.
+   * @param phase - the running phase carrying the in-memory counter.
+   * @returns the next free turn number.
+   */
+  private nextTurnNumber(phase: { turn: number }): number {
+    let logged = 0
+    try {
+      for (const event of this.session.ownEvents()) {
+        if (event.type !== 'turn/start') continue
+        const value = (event.data as { turn?: number }).turn
+        if (typeof value === 'number' && value > logged) logged = value
+      }
+    } catch {
+      // A read failure only means falling back to the in-memory counter.
+    }
+    return Math.max(phase.turn, logged) + 1
+  }
+
   private buildRequest(
     config: LlmCallConfig,
     preparedCall: PreparedLlmCall | undefined,
