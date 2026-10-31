@@ -822,6 +822,35 @@ export class KujiraPersonaController extends TypertRemoteService {
   }
 
   /**
+   * Record one proactive message as its own complete turn.
+   *
+   * An assistant message must belong to an open turn and step; appending one to a
+   * closed turn makes the log unreadable. Proactive sends happen while the sibling
+   * is idle, so this opens and closes a turn around the message.
+   * @param target - the sibling session receiving the message.
+   * @param text - message body to record.
+   */
+  private appendProactiveTurn(target: Session, text: string): void {
+    const position = this.latestPosition(target)
+    const turn = (position.turn ?? 0) + 1
+    const step = 1
+    const message = createAssistantMessage({
+      content: [{ type: 'text', text }],
+      source: { provider: 'kujira-chan', model: 'persona-main' },
+    })
+    target.append('turn/start', { turn } as never)
+    target.append('step/start', { turn, step } as never)
+    target.append('assistant/message', {
+      turn,
+      step,
+      message,
+      stream: [{ type: 'text-chunks', time0: Date.now(), index: 0, dt: [0], texts: [text] }],
+    }, { surfaceOp: 'append' } as never)
+    target.append('step/end', { turn, step } as never)
+    target.append('turn/end', { turn, reason: { kind: 'completed' } } as never)
+  }
+
+  /**
    * Resolve a short handle (or a full id) back to a live Session id.
    * @param handle - the value the model passed to the tool.
    * @returns the full Session id, or undefined when nothing matches.
@@ -899,7 +928,7 @@ export class KujiraPersonaController extends TypertRemoteService {
     // history first (clean text), then push it out through the channel when the
     // sibling belongs to one. Append does not reach the channel, because the
     // channel only listens to live assistant streams.
-    this.appendAssistant(target, text)
+    this.appendProactiveTurn(target, text)
     const channel = this.channelService()
     const channelKey = typeof channel?.keyOfSession === 'function' ? channel.keyOfSession(key) : undefined
     if (channelKey === undefined || typeof channel?.sendMarked !== 'function') return
