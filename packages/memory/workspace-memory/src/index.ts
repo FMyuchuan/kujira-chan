@@ -517,6 +517,9 @@ export class WorkspaceMemoryRuntime extends Service implements WorkspaceMemory {
 
   private installAgentRetrieval(ctx: Context): void {
     ctx.on('agent/pre-step', async ({ agent, messages, step }, next) => {
+      // Child sessions never call a model, so recalled memory would only add noise
+      // to their transcript (and to what the main session forwards).
+      if (this.isChildSession(agent.session.id)) return next()
       const decision = await next()
       if (decision.kind === 'reject' || step !== 1) return decision
       const query = messages.map(messageText).filter(Boolean).join('\n').trim()
@@ -534,9 +537,29 @@ export class WorkspaceMemoryRuntime extends Service implements WorkspaceMemory {
     })
   }
 
+  /**
+   * Whether this session is one of the persona's child sessions, whose memory the
+   * main session already keeps. The persona plugin publishes the live predicate,
+   * so both halves read the same rule instead of duplicating it.
+   * @param sessionId - the session being checked.
+   * @returns true when a persona main session owns this conversation.
+   */
+  private isChildSession(sessionId: string): boolean {
+    const probe = (globalThis as unknown as Record<symbol, unknown>)[Symbol.for('dsh.kujira.isForwardOnly')]
+    if (typeof probe !== 'function') return false
+    try {
+      return (probe as (id: string) => boolean)(sessionId)
+    } catch {
+      return false
+    }
+  }
+
   private installAgentCheckpointing(ctx: Context): void {
     ctx.on('agent/turn-stopping', ({ agent }) => {
       if (agent.session.header.parentSession !== undefined || agent.session.header.origin === 'subagent') return
+      // A persona child session only relays text to the main session; recording it
+      // here would duplicate every utterance into the shared workspace memory.
+      if (this.isChildSession(agent.session.id)) return
       const messages = conversationMessages(agent)
       void this.checkpoint({ sessionId: agent.session.id, messages, reason: 'segment-end' }).catch(error => {
         ctx.logger.warn('workspace-memory Agent checkpoint failed: %o', error)
