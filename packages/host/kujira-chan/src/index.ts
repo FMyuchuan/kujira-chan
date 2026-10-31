@@ -848,7 +848,13 @@ export class KujiraPersonaController extends TypertRemoteService {
    */
   private async deliverReply(handle: string, text: string, quote?: string): Promise<void> {
     const sessionId = this.resolveSession(handle)
-    const target = sessionId === undefined ? undefined : this.ctx.sessions.get(sessionId)
+    if (sessionId === undefined) {
+      throw new Error(`unknown session ${JSON.stringify(handle)}; use the id from the forwarded message`)
+    }
+    // A session that is only on disk (after a restart, or a wakeup scheduled before
+    // one) still has to receive this message, and the record belongs in its log.
+    // Bringing it back is how the append below can happen at all.
+    const target = await this.resolveTarget(sessionId)
     if (target === undefined) {
       throw new Error(`unknown session ${JSON.stringify(handle)}; use the id from the forwarded message`)
     }
@@ -1116,6 +1122,23 @@ export class KujiraPersonaController extends TypertRemoteService {
       await this.write(next)
       this.personasCache = next
     })
+  }
+
+  /**
+   * Get a session from memory, resuming it from disk when it is not loaded.
+   * @param sessionId - full session id.
+   * @returns the live session, or undefined when it does not exist.
+   */
+  private async resolveTarget(sessionId: SessionId): Promise<Session | undefined> {
+    const loaded = this.ctx.sessions.get(sessionId)
+    if (loaded !== undefined) return loaded
+    try {
+      const result = await this.ctx.sessionController.resolveAgent(sessionId)
+      if ('error' in result) return undefined
+    } catch {
+      return undefined
+    }
+    return this.ctx.sessions.get(sessionId)
   }
 
   /**
