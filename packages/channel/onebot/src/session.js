@@ -565,9 +565,31 @@ export function createAgentPool(options) {
           ...(setup ? { setup } : {}),
         })
       } catch (resumeError) {
-        // 那个会话正被别的写句柄占着（例如刚在 Web 里打开过）：换个新会话接上，
-        // 旧的历史留在原会话里，不因为一次占用就把整个通道卡住。
-        log('接不回旧会话，改开新的：', key, resumeError?.message ?? String(resumeError))
+        const message = String(resumeError?.message ?? '')
+        // 写句柄被占 = 这个会话已经在别处活着（例如正在 Web 里打开，UI 为了订阅
+        // 助手流会真的把 agent 激活起来）。那就直接复用那个 agent，别再开新的：
+        // 同一会话两个 agent 会让历史分裂成两条线。
+        if (/already owned/i.test(message)) {
+          const live = typeof ctx.agents?.get === 'function' ? ctx.agents.get(sessionId) : undefined
+          if (live !== undefined) {
+            log('会话被占用，复用已加载的 agent：', key, sessionId)
+            sessions.set(key, {
+              key,
+              sessionId,
+              agent: live,
+              handle: { agent: live },
+              buf: '',
+              answerFrom: 0,
+              toolCalling: false,
+              step: 0,
+              toolId: '',
+              busy: false,
+            })
+            return sessions.get(key)
+          }
+        }
+        // 真的没有活着的 agent 才回退新建：旧历史留在原会话里，不卡住通道。
+        log('接不回旧会话，改开新的：', key, message)
         idStore?.drop(key)
         const fresh = randomUUID()
         handle = await ctx.agents.create({
