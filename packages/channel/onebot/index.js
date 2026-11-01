@@ -321,10 +321,14 @@ export function apply(ctx, rawConfig) {
       const images = await collectImages(message)
       const files = await collectFiles(message)
       const hints = [
-        ...images.map(item => (item.path ? `[图片 ${item.path}]` : '')),
-        ...files.map(item => (item.path ? `[文件 ${item.path}]` : '')),
+        ...images.map(item => (item.path ? `→ 图在 ${item.path}` : '')),
+        ...files.map(item => (item.path ? `→ 文件在 ${item.path}` : '')),
       ].filter(line => line !== '')
-      const body = hints.length > 0 ? `${text}\n${hints.join('\n')}` : text
+      // The humanized body already carries a placeholder for every attachment;
+      // replace those with the real paths instead of naming each one twice.
+      const body = hints.length === 0
+        ? text
+        : `${text.replace(/\[文件[^\]]*\]/gu, '').replace(/（图）/gu, '').replace(/\n{2,}/gu, '\n').trim()}\n${hints.join('\n')}`
       rec.agent.followup({
         id: randomUUID(),
         role: 'user',
@@ -421,7 +425,7 @@ export function apply(ctx, rawConfig) {
         const ref = await attachments.saveFile({ data, name: entry.name })
         if (ref !== undefined) {
           const onDisk = typeof attachments.fileHostPath === 'function' ? attachments.fileHostPath(ref) : undefined
-          refs.push({ attachment: ref, path: onDisk ?? attachmentHostPath(ref, 'file') })
+          refs.push({ attachment: ref, name: entry.name, path: onDisk ?? attachmentHostPath(ref, 'file') })
         }
       } catch (e) {
         log('拉取文件失败：', e?.message ?? String(e))
@@ -478,10 +482,12 @@ export function apply(ctx, rawConfig) {
         const data = new Uint8Array(await response.arrayBuffer())
         const header = String(response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
         const mediaType = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(header) ? header : 'image/jpeg'
-        const saved = await attachments.saveImages([{ data, mediaType, name: 'qq-image' }])
+        const rawName = decodeURIComponent(String(url.split('/').pop() ?? '').split('?')[0] ?? '').trim()
+        const displayName = rawName !== '' ? rawName.slice(0, 80) : 'qq-image'
+        const saved = await attachments.saveImages([{ data, mediaType, name: displayName }])
         if (saved.length > 0) {
           const onDisk = typeof attachments.imageHostPath === 'function' ? attachments.imageHostPath(saved[0]) : undefined
-          refs.push({ attachment: saved[0], path: onDisk ?? attachmentHostPath(saved[0], 'image') })
+          refs.push({ attachment: saved[0], name: displayName, path: onDisk ?? attachmentHostPath(saved[0], 'image') })
         }
       } catch (e) {
         log('拉取图片失败：', e?.message ?? String(e))

@@ -278,8 +278,12 @@ export function humanizeCq(message, options = {}) {
     }
     if (type === 'image') {
       const url = String(seg.data.url ?? '').trim()
-      if (imageLinks && /^https?:\/\//i.test(url)) parts.push(`（图 ${url}）`)
-      else parts.push('（图）')
+      // QQ does not always carry a file name; fall back to the URL tail.
+      const rawName = String(seg.data.file ?? seg.data.name ?? '').trim()
+        || decodeURIComponent(String(url.split('/').pop() ?? '').split('?')[0] ?? '').trim()
+      const label = rawName === '' ? '图' : `图 ${rawName.slice(0, 60)}`
+      if (imageLinks && /^https?:\/\//i.test(url)) parts.push(`（${label} ${url}）`)
+      else parts.push(`（${label}）`)
       continue
     }
     if (type === 'file') {
