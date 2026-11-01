@@ -403,6 +403,7 @@ export function apply(ctx, rawConfig) {
       .map(segment => ({
         url: String(segment.data?.url ?? '').trim(),
         name: String(segment.data?.name ?? segment.data?.file ?? 'qq-file').trim().slice(0, 80) || 'qq-file',
+        size: Number(segment.data?.size) || 0,
       }))
       .filter(entry => /^https?:\/\//i.test(entry.url))
       .slice(0, 4)
@@ -412,7 +413,9 @@ export function apply(ctx, rawConfig) {
     const refs = []
     for (const entry of wanted) {
       try {
-        const response = await fetch(entry.url, { signal: AbortSignal.timeout(30_000) })
+        // 每 MB 给 0.1 分钟，至少 30 秒：大文件按体积放宽，小文件不白等。
+        const budgetMs = Math.max(30_000, Math.round((entry.size / (1024 * 1024)) * 6_000))
+        const response = await fetch(entry.url, { signal: AbortSignal.timeout(budgetMs) })
         if (!response.ok) {
           log('拉取文件失败（状态码）：', response.status)
           continue
