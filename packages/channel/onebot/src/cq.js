@@ -281,9 +281,8 @@ export function humanizeCq(message, options = {}) {
       // QQ does not always carry a file name; fall back to the URL tail.
       const rawName = String(seg.data.file ?? seg.data.name ?? '').trim()
         || decodeURIComponent(String(url.split('/').pop() ?? '').split('?')[0] ?? '').trim()
-      const label = rawName === '' ? '图' : `图 ${rawName.slice(0, 60)}`
-      if (imageLinks && /^https?:\/\//i.test(url)) parts.push(`（${label} ${url}）`)
-      else parts.push(`（${label}）`)
+      const label = rawName === '' ? '[图片]' : `[图片 ${rawName.slice(0, 60)}]`
+      parts.push(imageLinks && /^https?:\/\//i.test(url) ? `${label} ${url}` : label)
       continue
     }
     if (type === 'file') {
