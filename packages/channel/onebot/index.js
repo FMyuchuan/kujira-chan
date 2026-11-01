@@ -318,10 +318,11 @@ export function apply(ctx, rawConfig) {
     if (config.debug) log('→ agent：\n' + text)
 
     try {
+      const images = await collectImages(message)
       rec.agent.followup({
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text }],
+        content: [...images.map(attachment => ({ type: 'image', attachment })), { type: 'text', text }],
         source: { kind: 'user' },
       })
     } catch (e) {
@@ -376,6 +377,42 @@ export function apply(ctx, rawConfig) {
     return { clean, replyTo: hit.id }
   }
 
+  /**
+   * Download image segments and store them as attachments, so the agent actually
+   * sees the picture instead of the placeholder word.
+   * @param {any} message parsed inbound message
+   * @returns {Promise<Array<object>>} attachment refs, newest last
+   */
+  async function collectImages(message) {
+    const segments = Array.isArray(message?.segments) ? message.segments : []
+    const urls = segments
+      .filter(segment => segment?.type === 'image')
+      .map(segment => String(segment.data?.url ?? '').trim())
+      .filter(url => /^https?:\/\//i.test(url))
+      .slice(0, 4)
+    if (urls.length === 0) return []
+    const attachments = typeof ctx.get === 'function' ? ctx.get('attachments') : undefined
+    if (attachments === undefined || typeof attachments.saveImages !== 'function') return []
+    const refs = []
+    for (const url of urls) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(15_000) })
+        if (!response.ok) {
+          log('拉取图片失败（状态码）：', response.status)
+          continue
+        }
+        const data = new Uint8Array(await response.arrayBuffer())
+        const header = String(response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+        const mediaType = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(header) ? header : 'image/jpeg'
+        const saved = await attachments.saveImages([{ data, mediaType, name: 'qq-image' }])
+        if (saved.length > 0) refs.push(saved[0])
+      } catch (e) {
+        log('拉取图片失败：', e?.message ?? String(e))
+      }
+    }
+    return refs
+  }
+
   async function reply(message, text) {
     // Marked shapes come from the persona side; an unmarked body keeps the
     // historical behaviour of quoting the message that triggered the turn.
@@ -427,11 +464,23 @@ export function apply(ctx, rawConfig) {
         sessionKeys: () => [...pool.sessions.keys()],
         /** 反查：某个 dsh 会话 id 对应哪个 QQ 会话 key */
         keyOfSession: (sessionId) => idStore?.keyOf(sessionId),
-        /** 主动发一条消息（不依赖是否有人在等）；正文可带引用标记 */
-        async sendMarked(key, raw) {
+        /**
+         * 主动发一条消息（不依赖是否有人在等）；正文可带引用标记。
+         * @param {string} key 会话 key
+         * @param {string} raw 带标记的正文
+         * @param {string[]} [images] base64 图片，依次附在正文前
+         */
+        async sendMarked(key, raw, images = []) {
           const parsed = parseMarked(key, String(raw ?? ''))
-          if (!parsed.clean) return
-          await api.send(key, parsed.clean, { replyTo: config.quoteReply ? parsed.replyTo : undefined })
+          const pictures = Array.isArray(images)
+            ? images.filter(item => typeof item === 'string' && item !== '')
+              .map(item => ({ type: 'image', data: { file: `base64://${item}` } }))
+            : []
+          if (!parsed.clean && pictures.length === 0) return
+          const payload = pictures.length === 0
+            ? parsed.clean
+            : [...pictures, ...(parsed.clean ? [{ type: 'text', data: { text: parsed.clean } }] : [])]
+          await api.send(key, payload, { replyTo: config.quoteReply ? parsed.replyTo : undefined })
           stat.replied += 1
         },
         login: () => login,

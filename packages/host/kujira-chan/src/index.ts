@@ -20,6 +20,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/types'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef as AttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session'
@@ -64,6 +65,7 @@ const MAIN_SESSION_CONTRACT = [
   '- 真正的人在别的会话里，看不到你在这里的输出。直接回答没有用，只有调用工具才算回复。',
   `- 回复方式：${SEND_TOOL}(session_id="<短id>", message="<你的回复>")。`,
   `- 默认不引用对方原消息；需要引用某一条时，给 ${SEND_TOOL} 带上 quote 参数（写那条消息正文的开头一段），匹配不到会报错。`,
+  `- 需要发图片时给 ${SEND_TOOL} 带上 image 参数（工作区里的图片路径，如 /path/to/cat.png）。`,
   '- 收到「[来自子会话 <短id> 的停止请求]」时，立即停止当前处理，不要再调用任何工具。',
   '- 你可以用 kujira_persona_prompt 查看或改写自己的人格提示词：不传 prompt 是查看，传 prompt 是改写。',
   '- 需要过一会儿自己再行动时，用 kujira_wake 安排一次唤醒：给 in（如 10m、2h）或 at（ISO 时间），可带 reason 说明到点要做什么。',
@@ -89,6 +91,8 @@ interface ForwardItem {
   readonly childSessionId: string
   /** Merged message text delivered to the main session. */
   text: string
+  /** Image attachments forwarded alongside the text. */
+  images: AttachmentRef[]
   /** Messages that arrived while this item was being answered. */
   pending: string[]
   /** Turn the main session started to answer this item, when known. */
@@ -480,7 +484,7 @@ export class KujiraPersonaController extends TypertRemoteService {
         .map(part => part.text)
         .join('')
         .trim()
-      if (text !== '') this.forwardText(session, text)
+      if (text !== '' || this.eventImages(event).length > 0) this.forwardText(session, text, this.eventImages(event))
     }
   }
 
@@ -489,7 +493,7 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param session - the sibling session that received the message.
    * @param text - the message text.
    */
-  private forwardText(session: Session, text: string): void {
+  private forwardText(session: Session, text: string, images: readonly AttachmentRef[] = []): void {
     const sessionId = session.id as string
     const cwd = (session.header as { cwd?: unknown } | undefined)?.cwd
     if (typeof cwd !== 'string' || cwd === '') return
@@ -510,12 +514,13 @@ export class KujiraPersonaController extends TypertRemoteService {
       // sibling's current step here: its answer belongs to that step, and ending it
       // early would leave the reply with nowhere to land. The queued message stays
       // in the sibling's inbox so its next step picks it up as its own message.
-      this.steer(persona, sessionId, text)
+      this.steer(persona, sessionId, text, images)
       return
     }
     const waiting = queue.waiting.find(item => item.childSessionId === sessionId)
     if (waiting !== undefined) {
       waiting.text = `${waiting.text}\n${text}`
+      if (images.length > 0) waiting.images = [...waiting.images, ...images]
       return
     }
     if (queue.waiting.length >= FORWARD_QUEUE_LIMIT) {
@@ -523,7 +528,7 @@ export class KujiraPersonaController extends TypertRemoteService {
       this.release(sessionId)
       return
     }
-    queue.waiting.push({ id: randomUUID(), childSessionId: sessionId, text, pending: [] })
+    queue.waiting.push({ id: randomUUID(), childSessionId: sessionId, text, images: [...images], pending: [] })
     this.pump(persona)
   }
 
@@ -533,7 +538,12 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param childSessionId - the sibling that sent it.
    * @param text - the new message text.
    */
-  private steer(persona: KujiraPersona, childSessionId: string, text: string): void {
+  private steer(
+    persona: KujiraPersona,
+    childSessionId: string,
+    text: string,
+    images: readonly AttachmentRef[] = [],
+  ): void {
     const main = persona.sessionId
     if (main === undefined) return
     const handle = shortSessionId(childSessionId)
@@ -543,7 +553,7 @@ export class KujiraPersonaController extends TypertRemoteService {
       requestId: randomUUID() as never,
       sessionId: main as SessionId,
       mode: 'steer',
-      content: [{ type: 'text', text: body }],
+      content: [...images.map(attachment => ({ type: 'image' as const, attachment })), { type: 'text' as const, text: body }],
     } as never, AbortSignal.timeout(30_000)).catch(() => {
       this.awaitingSteer.delete(childSessionId)
     })
@@ -638,6 +648,16 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param event - the appended event.
    * @returns the joined text blocks, or an empty string.
    */
+  private eventImages(event: SessionEvent): readonly AttachmentRef[] {
+    const content = (event.data as { content?: readonly { type?: string, attachment?: AttachmentRef }[] }).content
+    if (!Array.isArray(content)) return []
+    const refs: AttachmentRef[] = []
+    for (const part of content) {
+      if (part.type === 'image' && part.attachment !== undefined) refs.push(part.attachment)
+    }
+    return refs
+  }
+
   private eventText(event: SessionEvent): string {
     const content = (event.data as { content?: readonly { type?: string, text?: unknown }[] }).content
     if (!Array.isArray(content)) return ''
@@ -711,7 +731,10 @@ export class KujiraPersonaController extends TypertRemoteService {
       requestId: randomUUID() as never,
       sessionId: main as SessionId,
       mode: 'steer',
-      content: [{ type: 'text', text: forwarded }],
+      content: [
+        ...item.images.map(attachment => ({ type: 'image' as const, attachment })),
+        { type: 'text' as const, text: forwarded },
+      ],
     } as never, AbortSignal.timeout(60_000)).catch(() => {
       // A rejected forward must release the queue, not wedge the persona.
       this.finish(persona, item)
@@ -916,7 +939,7 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param handle - the short session id the model used.
    * @param text - the reply text.
    */
-  private async deliverReply(handle: string, text: string, quote?: string): Promise<void> {
+  private async deliverReply(handle: string, text: string, quote?: string, image?: string): Promise<void> {
     const sessionId = await this.resolveSession(handle)
     if (sessionId === undefined) {
       throw new Error(`unknown session ${JSON.stringify(handle)}; use the id from the forwarded message`)
@@ -957,10 +980,28 @@ export class KujiraPersonaController extends TypertRemoteService {
     const channelKey = typeof channel?.keyOfSession === 'function' ? channel.keyOfSession(key) : undefined
     if (channelKey === undefined || typeof channel?.sendMarked !== 'function') return
     try {
-      await channel.sendMarked(channelKey, quoted)
+      const pictures = image === undefined || image.trim() === '' ? [] : [await this.readImageArgument(image.trim())]
+      await channel.sendMarked(channelKey, quoted, pictures)
     } catch (error: unknown) {
       throw new Error(`channel send failed: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /**
+   * Read one image argument into a base64 payload.
+   *
+   * Only files the workspace can already see are allowed, so the tool cannot be
+   * turned into an arbitrary file reader.
+   * @param path - absolute or workspace-relative image path.
+   * @returns base64-encoded bytes.
+   */
+  private async readImageArgument(path: string): Promise<string> {
+    if (!/\.(png|jpe?g|gif|webp)$/iu.test(path)) {
+      throw new Error(`不是支持的图片类型：${path}`)
+    }
+    const data = await readFile(path)
+    if (data.byteLength > 8 * 1024 * 1024) throw new Error('图片太大（上限 8 MB）')
+    return data.toString('base64')
   }
 
   /**
@@ -969,11 +1010,11 @@ export class KujiraPersonaController extends TypertRemoteService {
    */
   private channelService(): {
     keyOfSession?: (sessionId: string) => string | undefined
-    sendMarked?: (key: string, text: string) => Promise<void>
+    sendMarked?: (key: string, text: string, images?: readonly string[]) => Promise<void>
   } | undefined {
     try {
       return (this.ctx as unknown as { get?: (name: string) => unknown }).get?.('onebot') as
-        | { keyOfSession?: (sessionId: string) => string | undefined, sendMarked?: (key: string, text: string) => Promise<void> }
+        | { keyOfSession?: (sessionId: string) => string | undefined, sendMarked?: (key: string, text: string, images?: readonly string[]) => Promise<void> }
         | undefined
     } catch {
       return undefined
@@ -1228,6 +1269,7 @@ export class KujiraPersonaController extends TypertRemoteService {
         session_id: { type: 'string', required: true, description: 'The short session id shown in a forwarded message, such as 6cba11d0.' },
         message: { type: 'string', required: true, description: 'The message text to place in that session.' },
         quote: { type: 'string', description: 'Content prefix of a recent message to quote. Pass it only when the message must point at one specific earlier message; the send fails when nothing matches.' },
+        image: { type: 'string', description: 'Local path of one image file to send along with the message. Paths outside the workspace are rejected.' },
       },
       output: {
         schema: {
@@ -1237,8 +1279,8 @@ export class KujiraPersonaController extends TypertRemoteService {
         },
         render: (args: { session_id: string }) => [{ type: 'text', text: `reply delivered to ${args.session_id}` }],
       },
-      async execute(args: { session_id: string, message: string, quote?: string }) {
-        await controller.deliverReply(args.session_id, args.message, args.quote)
+      async execute(args: { session_id: string, message: string, quote?: string, image?: string }) {
+        await controller.deliverReply(args.session_id, args.message, args.quote, args.image)
         return { delivered: true }
       },
     })
