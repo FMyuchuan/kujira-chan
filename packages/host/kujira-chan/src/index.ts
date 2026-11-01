@@ -489,7 +489,12 @@ export class KujiraPersonaController extends TypertRemoteService {
         .map(part => part.text)
         .join('')
         .trim()
-      if (text !== '' || this.eventImages(event).length > 0) this.forwardText(session, text, this.eventImages(event))
+      // This event is the inbox splice, not the message itself: read the
+      // attachments off the inserted message, not off the event payload.
+      const images = (content as readonly { type?: string, attachment?: AttachmentRef }[])
+        .filter(part => part.type === 'image' && part.attachment !== undefined)
+        .map(part => part.attachment as AttachmentRef)
+      if (text !== '' || images.length > 0) this.forwardText(session, text, images)
     }
   }
 
