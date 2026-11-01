@@ -324,11 +324,9 @@ export function apply(ctx, rawConfig) {
         ...images.map(item => (item.path ? `→ 图在 ${item.path}` : '')),
         ...files.map(item => (item.path ? `→ 文件在 ${item.path}` : '')),
       ].filter(line => line !== '')
-      // The humanized body already carries a placeholder for every attachment;
-      // replace those with the real paths instead of naming each one twice.
-      const body = hints.length === 0
-        ? text
-        : `${text.replace(/\[文件[^\]]*\]/gu, '').replace(/（图）/gu, '').replace(/\n{2,}/gu, '\n').trim()}\n${hints.join('\n')}`
+      // Keep the humanized placeholder line and append where the bytes live:
+      // one line says what the attachment is, the next says how to open it.
+      const body = hints.length === 0 ? text : `${text}\n${hints.join('\n')}`
       rec.agent.followup({
         id: randomUUID(),
         role: 'user',
