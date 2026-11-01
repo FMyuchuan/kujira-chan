@@ -513,6 +513,7 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param text - the message text.
    */
   private forwardText(session: Session, text: string, images: readonly AttachmentRef[] = [], files: readonly FileAttachmentRef[] = []): void {
+    console.log(`[fwd] sid=${String(session.id).slice(0, 12)} text=${text.length} images=${images.length} files=${files.length}`)
     const sessionId = session.id as string
     const cwd = (session.header as { cwd?: unknown } | undefined)?.cwd
     if (typeof cwd !== 'string' || cwd === '') return
@@ -548,6 +549,7 @@ export class KujiraPersonaController extends TypertRemoteService {
       this.release(sessionId)
       return
     }
+    console.log(`[fwd] queued (waiting=${queue.waiting.length + 1})`)
     queue.waiting.push({ id: randomUUID(), childSessionId: sessionId, text, images: [...images], files: [...files], pending: [] })
     this.pump(persona)
   }
@@ -563,7 +565,9 @@ export class KujiraPersonaController extends TypertRemoteService {
     childSessionId: string,
     text: string,
     images: readonly AttachmentRef[] = [],
-    files: readonly FileAttachmentRef[] = [],
+    // Files travel as paths in the text: prompt() only accepts file blocks that
+    // name a staged upload receipt, which a channel never has.
+    _files: readonly FileAttachmentRef[] = [],
   ): void {
     const main = persona.sessionId
     if (main === undefined) return
@@ -576,7 +580,6 @@ export class KujiraPersonaController extends TypertRemoteService {
       mode: 'steer',
       content: [
         ...images.map(attachment => ({ type: 'image' as const, attachment })),
-        ...files.map(attachment => ({ type: 'file' as const, attachment })),
         { type: 'text' as const, text: body },
       ],
     } as never, AbortSignal.timeout(30_000)).catch(() => {
@@ -758,6 +761,7 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param item - the item to deliver.
    */
   private dispatch(persona: KujiraPersona, item: ForwardItem): void {
+    console.log(`[dispatch] images=${item.images.length} files=${item.files.length} text=${item.text.length}`)
     const main = persona.sessionId
     if (main === undefined) return
     const handle = shortSessionId(item.childSessionId)
@@ -768,10 +772,12 @@ export class KujiraPersonaController extends TypertRemoteService {
       mode: 'steer',
       content: [
         ...item.images.map(attachment => ({ type: 'image' as const, attachment })),
-        ...item.files.map(attachment => ({ type: 'file' as const, attachment })),
         { type: 'text' as const, text: forwarded },
       ],
-    } as never, AbortSignal.timeout(60_000)).catch(() => {
+    } as never, AbortSignal.timeout(60_000)).then(() => {
+      console.log('[dispatch] prompt accepted')
+    }).catch((error: unknown) => {
+      console.log('[dispatch] prompt rejected:', error instanceof Error ? error.message : String(error))
       // A rejected forward must release the queue, not wedge the persona.
       this.finish(persona, item)
     })
