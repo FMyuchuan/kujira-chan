@@ -137,6 +137,8 @@ export class KujiraPersonaController extends TypertRemoteService {
   private readonly seenMessages = new Set<string>()
   /** Pending self-wakeups for this process: id -> timer and what to wake with. */
   private readonly wakeups = new Map<string, { timer: NodeJS.Timeout, at: number, reason: string, personaId: string }>()
+  /** Images waiting to follow a streamed answer, keyed by child session. */
+  private readonly pendingImages = new Map<string, string[]>()
   /** Interrupts steered into a main session, keyed by child session, awaiting consumption. */
   private readonly awaitingSteer = new Map<string, { personaId: string, text: string }>()
   /** Turn each persona's main session is currently running, absent when it is idle. */
@@ -749,6 +751,8 @@ export class KujiraPersonaController extends TypertRemoteService {
   private finish(persona: KujiraPersona, item: ForwardItem): void {
     const queue = this.stateOf(persona.id)
     if (queue.active === item) delete queue.active
+    const pictures = this.pendingImages.get(item.childSessionId)
+    this.pendingImages.delete(item.childSessionId)
     const merged = this.pendingReplies.get(item.childSessionId)
     this.pendingReplies.delete(item.childSessionId)
     if (this.endParked(item.childSessionId)) {
@@ -758,6 +762,15 @@ export class KujiraPersonaController extends TypertRemoteService {
       // so it still reaches the sibling, after the messages it answers.
       const target = this.ctx.sessions.get(item.childSessionId as SessionId)
       if (target !== undefined) this.appendAssistant(target, merged)
+    }
+    if (pictures !== undefined && pictures.length > 0) {
+      const channel = this.channelService()
+      const channelKey = typeof channel?.keyOfSession === 'function'
+        ? channel.keyOfSession(item.childSessionId)
+        : undefined
+      if (channelKey !== undefined && typeof channel?.sendMarked === 'function') {
+        void channel.sendMarked(channelKey, '', pictures).catch(() => undefined)
+      }
     }
     this.pump(persona)
   }
@@ -968,7 +981,21 @@ export class KujiraPersonaController extends TypertRemoteService {
     }
     // Push straight into the parked turn so the answer streams in as it is
     // produced. Repeated calls append to the same sink, keeping one message.
-    if (this.pushToParked(key, quoted)) return
+    if (this.pushToParked(key, quoted)) {
+      // A parked turn streams text only, so the picture waits for the turn to
+      // settle and follows the answer as its own message.
+      if (image !== undefined && image.trim() !== '') {
+        try {
+          const encoded = await this.readImageArgument(image.trim())
+          const list = this.pendingImages.get(key) ?? []
+          list.push(encoded)
+          this.pendingImages.set(key, list)
+        } catch {
+          // An unreadable path only costs the picture; the text still streams.
+        }
+      }
+      return
+    }
     // No parked turn: this is a proactive message. Record it in the sibling's
     // history first (clean text), then push it out through the channel when the
     // sibling belongs to one. Append does not reach the channel, because the
