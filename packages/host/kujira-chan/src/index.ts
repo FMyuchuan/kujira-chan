@@ -458,8 +458,11 @@ export class KujiraPersonaController extends TypertRemoteService {
     // The inbox handler forwards steer input first; drop the transcript echo.
     if (typeof message.id === 'string' && this.seenMessages.has(message.id)) return
     const text = this.eventText(event)
-    if (text === '') return
-    this.forwardText(session, text)
+    const images = this.eventImages(event)
+    // A picture-only message carries no text, so emptiness alone is not a reason
+    // to drop it.
+    if (text === '' && images.length === 0) return
+    this.forwardText(session, text, images)
   }
 
   /**
