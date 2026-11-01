@@ -414,20 +414,41 @@ export function apply(ctx, rawConfig) {
           continue
         }
         const data = new Uint8Array(await response.arrayBuffer())
-        if (data.byteLength > 20 * 1024 * 1024) {
+        if (data.byteLength > 100 * 1024 * 1024) {
           log('文件太大，跳过：', entry.name, data.byteLength)
           continue
         }
         const ref = await attachments.saveFile({ data, name: entry.name })
         if (ref !== undefined) {
-          const path = typeof attachments.fileHostPath === 'function' ? attachments.fileHostPath(ref) : undefined
-          refs.push({ attachment: ref, path })
+          const onDisk = typeof attachments.fileHostPath === 'function' ? attachments.fileHostPath(ref) : undefined
+          refs.push({ attachment: ref, path: onDisk ?? attachmentHostPath(ref, 'file') })
         }
       } catch (e) {
         log('拉取文件失败：', e?.message ?? String(e))
       }
     }
     return refs
+  }
+
+  /**
+   * Derive the on-disk path of a stored attachment.
+   *
+   * The attachment backend keeps `<kind>/<前两位>/<hash>[ /<name>]` under the dsh
+   * home, and the reference carries `sha256:<hash>`, so the path follows from the
+   * reference without asking the backend.
+   * @param {any} ref attachment reference
+   * @param {'image'|'file'} kind which store the object lives in
+   * @returns {string|undefined} absolute path when the reference looks sound
+   */
+  function attachmentHostPath(ref, kind) {
+    const id = String(ref?.attachmentId ?? '').replace(/^sha256:/, '').trim()
+    if (!/^[0-9a-f]{64}$/i.test(id)) return undefined
+    const home = process.env.DSH_HOME?.trim() || `${process.env.HOME ?? '/root'}/.dsh`
+    if (kind === 'file') {
+      const name = String(ref?.name ?? 'file').replace(/[\/\\]/g, '_')
+      return `${home}/attachments/v1/files/${id.slice(0, 2)}/${id}/${name}`
+    }
+    return `${home}/attachments/v1/objects/${id.slice(0, 2)}/${id}`
   }
 
   /**
@@ -459,8 +480,8 @@ export function apply(ctx, rawConfig) {
         const mediaType = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(header) ? header : 'image/jpeg'
         const saved = await attachments.saveImages([{ data, mediaType, name: 'qq-image' }])
         if (saved.length > 0) {
-          const path = typeof attachments.imageHostPath === 'function' ? attachments.imageHostPath(saved[0]) : undefined
-          refs.push({ attachment: saved[0], path })
+          const onDisk = typeof attachments.imageHostPath === 'function' ? attachments.imageHostPath(saved[0]) : undefined
+          refs.push({ attachment: saved[0], path: onDisk ?? attachmentHostPath(saved[0], 'image') })
         }
       } catch (e) {
         log('拉取图片失败：', e?.message ?? String(e))

@@ -1071,7 +1071,8 @@ export class KujiraPersonaController extends TypertRemoteService {
    */
   private async readFileArgument(path: string): Promise<{ base64: string, name: string }> {
     const data = await readFile(path)
-    if (data.byteLength > 20 * 1024 * 1024) throw new Error('文件太大（上限 20 MB）')
+    // QQ caps a chat file at 100 MB.
+    if (data.byteLength > 100 * 1024 * 1024) throw new Error('文件太大（上限 100 MB，和 QQ 一致）')
     return { base64: data.toString('base64'), name: basename(path) }
   }
 
@@ -1080,7 +1081,8 @@ export class KujiraPersonaController extends TypertRemoteService {
       throw new Error(`不是支持的图片类型：${path}`)
     }
     const data = await readFile(path)
-    if (data.byteLength > 8 * 1024 * 1024) throw new Error('图片太大（上限 8 MB）')
+    // QQ caps a picture at 10 MB.
+    if (data.byteLength > 10 * 1024 * 1024) throw new Error('图片太大（上限 10 MB，和 QQ 一致）')
     return data.toString('base64')
   }
 
