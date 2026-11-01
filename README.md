@@ -31,7 +31,7 @@
 
 | 工具 / 页面 | 作用 |
 |---|---|
-| `kujira_send(session_id, message, quote?)` | 投递消息；对方空闲时变成主动消息，`quote` 传内容前缀可引用某条历史消息 |
+| `kujira_send(session_id, message, quote?, image?, file?)` | 投递消息；对方空闲时变成主动消息。`quote` 传内容前缀可引用历史消息，`image` / `file` 传本地路径可附带附件 |
 | `kujira_persona_prompt(prompt?)` | 主会话查看或改写自己的人格提示词 |
 | `kujira_wake({ in, at, reason, cancel })` | 定时唤醒自己，跨重启保留、可取消 |
 | 插件设置页 | 人格列表、提示词编辑、待触发唤醒 |

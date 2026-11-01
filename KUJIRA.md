@@ -477,6 +477,49 @@ kujira_wake({ cancel: "<id>" })
 判断复用 kujira 的探针 `dsh.kujira.isForwardOnly`（cwd 属于某人格工作区且会话不是该人格主会话），
 两边不会各写一份再慢慢跑偏。否则同一句对话会被主会话和子会话各记一遍，记忆文件迅速膨胀。
 
+### 附件（图片与文件）
+
+两个方向都通，格式一致：一行说明「是什么」，一行说明「在哪儿」。
+
+```text
+【私聊 · 22:13】Somniorume(QQ 3320167140)
+[文件 数学分析教程 上册.pdf]
+→ 文件在 /root/.dsh/attachments/v1/files/26/…/数学分析教程 上册.pdf
+```
+
+**入站**
+
+| 类型 | 处理 |
+|---|---|
+| 图片 | 下载 → `attachments.saveImages` → 作为 image 块转发，主会话能**看到内容** |
+| 文件 | 下载 → `attachments.saveFile` → 文件块转发，主会话按路径 `read` |
+
+- 下载预算：每 MB 6 秒，最低 30 秒（60 MB 的 PDF 约 6 分钟）
+- 大小上限跟 QQ 一致：图片 10 MB，文件 100 MB
+- 路径不依赖附件后端（`fileHostPath` / `imageHostPath` 是返回 `undefined` 的抽象默认实现），
+  而是按内容寻址布局自己推算：`<kind>/<哈希前两位>/<哈希>[/<名字>]`
+
+**出站**
+
+```text
+kujira_send({ session_id: "…", message: "…", image: "/path/x.png" })
+kujira_send({ session_id: "…", message: "…", file: "/path/x.pdf" })
+```
+
+对方正在等回复时，文字先流式发出去，图片和文件在这一轮结束后补发。
+
+**一个必须知道的接口约束**
+
+`sessionController.prompt()` 的 **file 块只接受「已上传收据」**：
+
+```ts
+const attachment = staged(part.receiptId)
+if (attachment === undefined) throw new RemoteError(…, 'File was not uploaded for this session.')
+```
+
+浏览器上传会先 stage 一份拿收据，通道没有这一步。所以转发时**文件不传 file 块，只把路径写进正文**；
+图片没有这个限制，照常传 image 块。曾经直接传 file 块，结果整个 prompt 被拒，主会话连消息都没收到。
+
 ### 通道侧需要的能力
 
 `onebot` 通过 `ctx.provide('onebot', ...)` 暴露：
