@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
+import { basename } from 'node:path'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -20,7 +21,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/types'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
-import type { ImageAttachmentRef as AttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { FileAttachmentRef, ImageAttachmentRef as AttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-session'
@@ -93,6 +94,8 @@ interface ForwardItem {
   text: string
   /** Image attachments forwarded alongside the text. */
   images: AttachmentRef[]
+  /** File attachments forwarded alongside the text. */
+  files: FileAttachmentRef[]
   /** Messages that arrived while this item was being answered. */
   pending: string[]
   /** Turn the main session started to answer this item, when known. */
@@ -139,6 +142,8 @@ export class KujiraPersonaController extends TypertRemoteService {
   private readonly wakeups = new Map<string, { timer: NodeJS.Timeout, at: number, reason: string, personaId: string }>()
   /** Images waiting to follow a streamed answer, keyed by child session. */
   private readonly pendingImages = new Map<string, string[]>()
+  /** Files waiting to follow a streamed answer, keyed by child session. */
+  private readonly pendingFiles = new Map<string, { base64: string, name: string }[]>()
   /** Interrupts steered into a main session, keyed by child session, awaiting consumption. */
   private readonly awaitingSteer = new Map<string, { personaId: string, text: string }>()
   /** Turn each persona's main session is currently running, absent when it is idle. */
@@ -459,10 +464,11 @@ export class KujiraPersonaController extends TypertRemoteService {
     if (typeof message.id === 'string' && this.seenMessages.has(message.id)) return
     const text = this.eventText(event)
     const images = this.eventImages(event)
-    // A picture-only message carries no text, so emptiness alone is not a reason
-    // to drop it.
-    if (text === '' && images.length === 0) return
-    this.forwardText(session, text, images)
+    const files = this.eventFiles(event)
+    // An attachment-only message carries no text, so emptiness alone is not a
+    // reason to drop it.
+    if (text === '' && images.length === 0 && files.length === 0) return
+    this.forwardText(session, text, images, files)
   }
 
   /**
@@ -494,7 +500,10 @@ export class KujiraPersonaController extends TypertRemoteService {
       const images = (content as readonly { type?: string, attachment?: AttachmentRef }[])
         .filter(part => part.type === 'image' && part.attachment !== undefined)
         .map(part => part.attachment as AttachmentRef)
-      if (text !== '' || images.length > 0) this.forwardText(session, text, images)
+      const files = (content as readonly { type?: string, attachment?: FileAttachmentRef }[])
+        .filter(part => part.type === 'file' && part.attachment !== undefined)
+        .map(part => part.attachment as FileAttachmentRef)
+      if (text !== '' || images.length > 0 || files.length > 0) this.forwardText(session, text, images, files)
     }
   }
 
@@ -503,7 +512,7 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param session - the sibling session that received the message.
    * @param text - the message text.
    */
-  private forwardText(session: Session, text: string, images: readonly AttachmentRef[] = []): void {
+  private forwardText(session: Session, text: string, images: readonly AttachmentRef[] = [], files: readonly FileAttachmentRef[] = []): void {
     const sessionId = session.id as string
     const cwd = (session.header as { cwd?: unknown } | undefined)?.cwd
     if (typeof cwd !== 'string' || cwd === '') return
@@ -524,13 +533,14 @@ export class KujiraPersonaController extends TypertRemoteService {
       // sibling's current step here: its answer belongs to that step, and ending it
       // early would leave the reply with nowhere to land. The queued message stays
       // in the sibling's inbox so its next step picks it up as its own message.
-      this.steer(persona, sessionId, text, images)
+      this.steer(persona, sessionId, text, images, files)
       return
     }
     const waiting = queue.waiting.find(item => item.childSessionId === sessionId)
     if (waiting !== undefined) {
       waiting.text = `${waiting.text}\n${text}`
       if (images.length > 0) waiting.images = [...waiting.images, ...images]
+      if (files.length > 0) waiting.files = [...waiting.files, ...files]
       return
     }
     if (queue.waiting.length >= FORWARD_QUEUE_LIMIT) {
@@ -538,7 +548,7 @@ export class KujiraPersonaController extends TypertRemoteService {
       this.release(sessionId)
       return
     }
-    queue.waiting.push({ id: randomUUID(), childSessionId: sessionId, text, images: [...images], pending: [] })
+    queue.waiting.push({ id: randomUUID(), childSessionId: sessionId, text, images: [...images], files: [...files], pending: [] })
     this.pump(persona)
   }
 
@@ -553,6 +563,7 @@ export class KujiraPersonaController extends TypertRemoteService {
     childSessionId: string,
     text: string,
     images: readonly AttachmentRef[] = [],
+    files: readonly FileAttachmentRef[] = [],
   ): void {
     const main = persona.sessionId
     if (main === undefined) return
@@ -563,7 +574,11 @@ export class KujiraPersonaController extends TypertRemoteService {
       requestId: randomUUID() as never,
       sessionId: main as SessionId,
       mode: 'steer',
-      content: [...images.map(attachment => ({ type: 'image' as const, attachment })), { type: 'text' as const, text: body }],
+      content: [
+        ...images.map(attachment => ({ type: 'image' as const, attachment })),
+        ...files.map(attachment => ({ type: 'file' as const, attachment })),
+        { type: 'text' as const, text: body },
+      ],
     } as never, AbortSignal.timeout(30_000)).catch(() => {
       this.awaitingSteer.delete(childSessionId)
     })
@@ -658,6 +673,16 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param event - the appended event.
    * @returns the joined text blocks, or an empty string.
    */
+  private eventFiles(event: SessionEvent): readonly FileAttachmentRef[] {
+    const content = (event.data as { content?: readonly { type?: string, attachment?: FileAttachmentRef }[] }).content
+    if (!Array.isArray(content)) return []
+    const refs: FileAttachmentRef[] = []
+    for (const part of content) {
+      if (part.type === 'file' && part.attachment !== undefined) refs.push(part.attachment)
+    }
+    return refs
+  }
+
   private eventImages(event: SessionEvent): readonly AttachmentRef[] {
     const content = (event.data as { content?: readonly { type?: string, attachment?: AttachmentRef }[] }).content
     if (!Array.isArray(content)) return []
@@ -743,6 +768,7 @@ export class KujiraPersonaController extends TypertRemoteService {
       mode: 'steer',
       content: [
         ...item.images.map(attachment => ({ type: 'image' as const, attachment })),
+        ...item.files.map(attachment => ({ type: 'file' as const, attachment })),
         { type: 'text' as const, text: forwarded },
       ],
     } as never, AbortSignal.timeout(60_000)).catch(() => {
@@ -761,6 +787,8 @@ export class KujiraPersonaController extends TypertRemoteService {
     if (queue.active === item) delete queue.active
     const pictures = this.pendingImages.get(item.childSessionId)
     this.pendingImages.delete(item.childSessionId)
+    const documents = this.pendingFiles.get(item.childSessionId)
+    this.pendingFiles.delete(item.childSessionId)
     const merged = this.pendingReplies.get(item.childSessionId)
     this.pendingReplies.delete(item.childSessionId)
     if (this.endParked(item.childSessionId)) {
@@ -771,13 +799,13 @@ export class KujiraPersonaController extends TypertRemoteService {
       const target = this.ctx.sessions.get(item.childSessionId as SessionId)
       if (target !== undefined) this.appendAssistant(target, merged)
     }
-    if (pictures !== undefined && pictures.length > 0) {
+    if ((pictures !== undefined && pictures.length > 0) || (documents !== undefined && documents.length > 0)) {
       const channel = this.channelService()
       const channelKey = typeof channel?.keyOfSession === 'function'
         ? channel.keyOfSession(item.childSessionId)
         : undefined
       if (channelKey !== undefined && typeof channel?.sendMarked === 'function') {
-        void channel.sendMarked(channelKey, '', pictures).catch(() => undefined)
+        void channel.sendMarked(channelKey, '', pictures ?? [], documents ?? []).catch(() => undefined)
       }
     }
     this.pump(persona)
@@ -960,7 +988,7 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param handle - the short session id the model used.
    * @param text - the reply text.
    */
-  private async deliverReply(handle: string, text: string, quote?: string, image?: string): Promise<void> {
+  private async deliverReply(handle: string, text: string, quote?: string, image?: string, file?: string): Promise<void> {
     const sessionId = await this.resolveSession(handle)
     if (sessionId === undefined) {
       throw new Error(`unknown session ${JSON.stringify(handle)}; use the id from the forwarded message`)
@@ -1002,6 +1030,16 @@ export class KujiraPersonaController extends TypertRemoteService {
           // An unreadable path only costs the picture; the text still streams.
         }
       }
+      if (file !== undefined && file.trim() !== '') {
+        try {
+          const document = await this.readFileArgument(file.trim())
+          const list = this.pendingFiles.get(key) ?? []
+          list.push(document)
+          this.pendingFiles.set(key, list)
+        } catch {
+          // Same as above: a missed file must not break the streamed answer.
+        }
+      }
       return
     }
     // No parked turn: this is a proactive message. Record it in the sibling's
@@ -1016,7 +1054,8 @@ export class KujiraPersonaController extends TypertRemoteService {
     if (channelKey === undefined || typeof channel?.sendMarked !== 'function') return
     try {
       const pictures = image === undefined || image.trim() === '' ? [] : [await this.readImageArgument(image.trim())]
-      await channel.sendMarked(channelKey, quoted, pictures)
+      const documents = file === undefined || file.trim() === '' ? [] : [await this.readFileArgument(file.trim())]
+      await channel.sendMarked(channelKey, quoted, pictures, documents)
     } catch (error: unknown) {
       throw new Error(`channel send failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -1030,6 +1069,12 @@ export class KujiraPersonaController extends TypertRemoteService {
    * @param path - absolute or workspace-relative image path.
    * @returns base64-encoded bytes.
    */
+  private async readFileArgument(path: string): Promise<{ base64: string, name: string }> {
+    const data = await readFile(path)
+    if (data.byteLength > 20 * 1024 * 1024) throw new Error('文件太大（上限 20 MB）')
+    return { base64: data.toString('base64'), name: basename(path) }
+  }
+
   private async readImageArgument(path: string): Promise<string> {
     if (!/\.(png|jpe?g|gif|webp)$/iu.test(path)) {
       throw new Error(`不是支持的图片类型：${path}`)
@@ -1045,11 +1090,11 @@ export class KujiraPersonaController extends TypertRemoteService {
    */
   private channelService(): {
     keyOfSession?: (sessionId: string) => string | undefined
-    sendMarked?: (key: string, text: string, images?: readonly string[]) => Promise<void>
+    sendMarked?: (key: string, text: string, images?: readonly string[], files?: readonly { base64: string, name: string }[]) => Promise<void>
   } | undefined {
     try {
       return (this.ctx as unknown as { get?: (name: string) => unknown }).get?.('onebot') as
-        | { keyOfSession?: (sessionId: string) => string | undefined, sendMarked?: (key: string, text: string, images?: readonly string[]) => Promise<void> }
+        | { keyOfSession?: (sessionId: string) => string | undefined, sendMarked?: (key: string, text: string, images?: readonly string[], files?: readonly { base64: string, name: string }[]) => Promise<void> }
         | undefined
     } catch {
       return undefined
@@ -1305,6 +1350,7 @@ export class KujiraPersonaController extends TypertRemoteService {
         message: { type: 'string', required: true, description: 'The message text to place in that session.' },
         quote: { type: 'string', description: 'Content prefix of a recent message to quote. Pass it only when the message must point at one specific earlier message; the send fails when nothing matches.' },
         image: { type: 'string', description: 'Local path of one image file to send along with the message. Paths outside the workspace are rejected.' },
+        file: { type: 'string', description: 'Local path of one arbitrary file to send along with the message.' },
       },
       output: {
         schema: {
@@ -1314,8 +1360,8 @@ export class KujiraPersonaController extends TypertRemoteService {
         },
         render: (args: { session_id: string }) => [{ type: 'text', text: `reply delivered to ${args.session_id}` }],
       },
-      async execute(args: { session_id: string, message: string, quote?: string, image?: string }) {
-        await controller.deliverReply(args.session_id, args.message, args.quote, args.image)
+      async execute(args: { session_id: string, message: string, quote?: string, image?: string, file?: string }) {
+        await controller.deliverReply(args.session_id, args.message, args.quote, args.image, args.file)
         return { delivered: true }
       },
     })

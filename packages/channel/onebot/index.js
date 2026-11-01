@@ -319,10 +319,20 @@ export function apply(ctx, rawConfig) {
 
     try {
       const images = await collectImages(message)
+      const files = await collectFiles(message)
+      const hints = [
+        ...images.map(item => (item.path ? `[图片 ${item.path}]` : '')),
+        ...files.map(item => (item.path ? `[文件 ${item.path}]` : '')),
+      ].filter(line => line !== '')
+      const body = hints.length > 0 ? `${text}\n${hints.join('\n')}` : text
       rec.agent.followup({
         id: randomUUID(),
         role: 'user',
-        content: [...images.map(attachment => ({ type: 'image', attachment })), { type: 'text', text }],
+        content: [
+          ...images.map(item => ({ type: 'image', attachment: item.attachment })),
+          ...files.map(item => ({ type: 'file', attachment: item.attachment })),
+          { type: 'text', text: body },
+        ],
         source: { kind: 'user' },
       })
     } catch (e) {
@@ -378,6 +388,49 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
+   * Download file segments and store them as attachments.
+   * @param {any} message parsed inbound message
+   * @returns {Promise<Array<object>>} file attachment refs
+   */
+  async function collectFiles(message) {
+    const segments = Array.isArray(message?.segments) ? message.segments : []
+    const wanted = segments
+      .filter(segment => segment?.type === 'file')
+      .map(segment => ({
+        url: String(segment.data?.url ?? '').trim(),
+        name: String(segment.data?.name ?? segment.data?.file ?? 'qq-file').trim().slice(0, 80) || 'qq-file',
+      }))
+      .filter(entry => /^https?:\/\//i.test(entry.url))
+      .slice(0, 4)
+    if (wanted.length === 0) return []
+    const attachments = typeof ctx.get === 'function' ? ctx.get('attachments') : undefined
+    if (attachments === undefined || typeof attachments.saveFile !== 'function') return []
+    const refs = []
+    for (const entry of wanted) {
+      try {
+        const response = await fetch(entry.url, { signal: AbortSignal.timeout(30_000) })
+        if (!response.ok) {
+          log('拉取文件失败（状态码）：', response.status)
+          continue
+        }
+        const data = new Uint8Array(await response.arrayBuffer())
+        if (data.byteLength > 20 * 1024 * 1024) {
+          log('文件太大，跳过：', entry.name, data.byteLength)
+          continue
+        }
+        const ref = await attachments.saveFile({ data, name: entry.name })
+        if (ref !== undefined) {
+          const path = typeof attachments.fileHostPath === 'function' ? attachments.fileHostPath(ref) : undefined
+          refs.push({ attachment: ref, path })
+        }
+      } catch (e) {
+        log('拉取文件失败：', e?.message ?? String(e))
+      }
+    }
+    return refs
+  }
+
+  /**
    * Download image segments and store them as attachments, so the agent actually
    * sees the picture instead of the placeholder word.
    * @param {any} message parsed inbound message
@@ -405,7 +458,10 @@ export function apply(ctx, rawConfig) {
         const header = String(response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
         const mediaType = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(header) ? header : 'image/jpeg'
         const saved = await attachments.saveImages([{ data, mediaType, name: 'qq-image' }])
-        if (saved.length > 0) refs.push(saved[0])
+        if (saved.length > 0) {
+          const path = typeof attachments.imageHostPath === 'function' ? attachments.imageHostPath(saved[0]) : undefined
+          refs.push({ attachment: saved[0], path })
+        }
       } catch (e) {
         log('拉取图片失败：', e?.message ?? String(e))
       }
@@ -470,16 +526,24 @@ export function apply(ctx, rawConfig) {
          * @param {string} raw 带标记的正文
          * @param {string[]} [images] base64 图片，依次附在正文前
          */
-        async sendMarked(key, raw, images = []) {
+        async sendMarked(key, raw, images = [], files = []) {
           const parsed = parseMarked(key, String(raw ?? ''))
           const pictures = Array.isArray(images)
             ? images.filter(item => typeof item === 'string' && item !== '')
               .map(item => ({ type: 'image', data: { file: `base64://${item}` } }))
             : []
-          if (!parsed.clean && pictures.length === 0) return
-          const payload = pictures.length === 0
+          const documents = Array.isArray(files)
+            ? files.filter(item => item && typeof item.base64 === 'string' && item.base64 !== '')
+              .map(item => ({ type: 'file', data: { file: `base64://${item.base64}`, name: String(item.name ?? 'file') } }))
+            : []
+          if (!parsed.clean && pictures.length === 0 && documents.length === 0) return
+          const payload = pictures.length === 0 && documents.length === 0
             ? parsed.clean
-            : [...pictures, ...(parsed.clean ? [{ type: 'text', data: { text: parsed.clean } }] : [])]
+            : [
+              ...pictures,
+              ...documents,
+              ...(parsed.clean ? [{ type: 'text', data: { text: parsed.clean } }] : []),
+            ]
           await api.send(key, payload, { replyTo: config.quoteReply ? parsed.replyTo : undefined })
           stat.replied += 1
         },
