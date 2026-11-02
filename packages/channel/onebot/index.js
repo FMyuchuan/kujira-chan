@@ -267,7 +267,7 @@ export function apply(ctx, rawConfig) {
     const selfId = selfIdFor(message)
     const atName = atNameFor(message.groupId)
     const quote = message.quoteId ? await quotes.resolve(message.key, message.quoteId) : undefined
-    const text = renderEnvelope(message, {
+    const envelope = renderEnvelope(message, {
       atName,
       selfId,
       quote,
@@ -275,11 +275,24 @@ export function apply(ctx, rawConfig) {
       tz: config.tz,
       imageLinks: config.imageLinks,
     })
+    // An interrupting message can carry attachments too, and this path never
+    // downloaded them: the main session only saw the placeholder word.
+    const images = await collectImages(message)
+    const files = await collectFiles(message)
+    const hints = [
+      ...images.map(item => (item.path ? `→ 图在 ${item.path}` : '')),
+      ...files.map(item => (item.path ? `→ 文件在 ${item.path}` : '')),
+    ].filter(line => line !== '')
+    const text = hints.length === 0 ? envelope : `${envelope}\n${hints.join('\n')}`
     try {
       rec.agent.steer({
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text }],
+        content: [
+          ...images.map(item => ({ type: 'image', attachment: item.attachment })),
+          ...files.map(item => ({ type: 'file', attachment: item.attachment })),
+          { type: 'text', text },
+        ],
         source: { kind: 'user' },
       })
       stat.interrupted = (stat.interrupted ?? 0) + 1
