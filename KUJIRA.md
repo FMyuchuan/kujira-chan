@@ -520,6 +520,34 @@ if (attachment === undefined) throw new RemoteError(…, 'File was not uploaded 
 浏览器上传会先 stage 一份拿收据，通道没有这一步。所以转发时**文件不传 file 块，只把路径写进正文**；
 图片没有这个限制，照常传 image 块。曾经直接传 file 块，结果整个 prompt 被拒，主会话连消息都没收到。
 
+### 记忆插件的整理流水线
+
+`workspace-memory` 不是每轮都落盘，而是先暂存再集中整理：
+
+```text
+每轮结束（turn-stopping）
+  → 消息进 pendingMessages
+够阈值或空闲 5 分钟（checkpointEligible）
+  → 调模型把对话蒸馏成 atomic operations
+  → 写 memory_entries.json，清掉已处理的 pending
+```
+
+阈值（`checkpointTurns` 10 / `checkpointChars` 4000 / `idleCheckpointMs` 5 分钟）只是
+**触发整理**的条件；`checkpointMaxChars`（40k 字符）决定单批喂给模型多少对话。
+
+**踩过的坑**：蒸馏的输出预算原来写死 `maxTokens: 1500`，而单批输入可以到 40k 字符。
+操作一多，模型写不完 JSON，`JSON.parse` 抛 `Unexpected end of JSON input`，
+`checkpoint` 返回 `failed` 且 **pending 一条都不清**。积压越多、单批越大、越容易再失败，
+四天堆到 1389 条，期间工作区摘要一直没更新。
+
+修法两条：
+
+1. 输出预算 1500 → 8000
+2. 解析失败时**抢救**已经写完整的操作对象，而不是整批丢弃
+
+排查手段：把静默的 `debugMemory('distill-error')` 换成 `console.error`，一行日志就能看见
+失败原因和耗时。
+
 ### 通道侧需要的能力
 
 `onebot` 通过 `ctx.provide('onebot', ...)` 暴露：
