@@ -1206,6 +1206,9 @@ export class WorkspaceMemoryEngine {
       operations = normalizeOperations(distilled)
       debugMemory('distill-complete', { scope: scope.key, durationMs: Math.max(0, this.store.now() - distillStartedAt), messages: prepared.staged.length })
     } catch (error) {
+      // TEMP DIAG: every checkpoint failure was silent, so a four-day backlog built
+      // up unnoticed. Surface it until the cause is fixed.
+      console.error(`[memory] distill failed (${scope.key}) after ${Math.max(0, this.store.now() - distillStartedAt)}ms:`, error)
       debugMemory('distill-error', { scope: scope.key, durationMs: Math.max(0, this.store.now() - distillStartedAt), error: String(error) })
       this.releaseClaims(scope, prepared.staged)
       const state = await this.store.withScope(scope, () => this.store.readState(scope))
